@@ -2,6 +2,57 @@
  * @OnlyCurrentDoc
  */
 
+/**
+ * DYNAMIC CONFIGURATION (HEADER BASED)
+ * Scans the 'Competency Matrix' Row 1 headers.
+ * Automatically categorizes skills based on prefixes: 'CORE -', 'LEAD -', 'TECH -'.
+ */
+
+
+// --- DYNAMIC CONFIGURATION (HEADER BASED) ---
+
+function getCompetencyConfig() {
+  // FIX: Open the specific Competency Spreadsheet ID, not the Active one
+  const ss = SpreadsheetApp.openById(COMPETENCY_SPREADSHEET_ID); 
+  const sheet = ss.getSheetByName('Competency Matrix');
+  
+  const config = { CORE: [], LEADERSHIP: [], TECHNICAL: [] };
+  if (!sheet) return config;
+
+  // Read the first row (Headers)
+  // We assume headers are in Row 1. If they are in Row 2, change "1:1" to "2:2"
+  const headers = sheet.getRange("1:1").getValues()[0]; 
+  const seen = new Set();
+
+  headers.forEach(header => {
+    // Normalize: Uppercase and collapse multiple spaces (Handles "CORE -  WORK" vs "CORE - WORK")
+    const h = header.toString().replace(/\s+/g, ' ').trim().toUpperCase();
+    
+    // Skip empty or duplicate headers
+    if (!h || seen.has(h)) return;
+    
+    // Sort into categories based on prefix
+    if (h.startsWith("CORE -")) {
+      seen.add(h);
+      config.CORE.push(h);
+    } else if (h.startsWith("LEAD -")) {
+      seen.add(h);
+      config.LEADERSHIP.push(h);
+    } else if (h.startsWith("TECH -")) {
+      seen.add(h);
+      config.TECHNICAL.push(h);
+    }
+  });
+
+  return config;
+}
+
+// Helper used by Team Heatmap
+function getAllCompetencies() {
+  const config = getCompetencyConfig();
+  return [...config.CORE, ...config.LEADERSHIP, ...config.TECHNICAL];
+}
+// --- END CONFIGURATION ---
 
 // --- CONFIGURATION ---
 // IMPORTANT: You MUST update this URL if you create a new web app deployment that changes its link!
@@ -9,7 +60,7 @@
 const WEB_APP_URL = "YOUR_WEB_APP_URL_GOES_HERE"; // PASTE YOUR NEW DEPLOYMENT URL HERE
 const JD_GENERAL_FOLDER_ID = '1Sv7uvDKlzFhEiM1ljCrRGvC51KgIZJfp';
 const JD_INCUMBENT_FOLDER_ID = '1ryXesBBwLs8Y1oEfLYDhDIxPQdeB_Ngx';
-const CHANGE_REQUESTS_FOLDER_ID = '1G57OJTZQ84ODeZLBiRkDwvmU-FVq2CcP';
+const CHANGE_REQUESTS_FOLDER_ID = '1XSW0ktaHt6eRkoZAuHdx8nCo1T2XCSn8';
 
 
 // Defines the sequential order of approval roles
@@ -19,6 +70,9 @@ const TALENT_DATA_SPREADSHEET_ID = '1sBy8d-uuenTRu_jeT7paTtDmnxcHFOjGgn-eEG91knY
 const COMPETENCY_SPREADSHEET_ID = '1cj_RuroWG5Tl1OqzalyK7t4dLDck-7Ytj5O1eb-Ks5c'; // <-- ADD THIS LINE
 // --- END CONFIGURATION ---
 
+function doGet(e) {
+  return HtmlService.createTemplateFromFile('Index').evaluate().setTitle('Interactive Organizational Chart').setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
 
 function onOpen() {
   SpreadsheetApp.getUi()
@@ -52,77 +106,36 @@ function processRequestAction(requestId, action, comments) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName('Org Chart Requests');
-    if (!sheet) {
-      throw new Error('"Org Chart Requests" sheet not found.');
-    }
+    if (!sheet) throw new Error('"Org Chart Requests" sheet not found.');
+    
     const data = sheet.getDataRange().getValues();
     const headers = data[0];
-    const headerMap = new Map(headers.map((h, i) => [h, i]));
+    const headerMap = new Map(headers.map((h, i) => [h.toString().replace(/\s+/g, '').toLowerCase(), i]));
 
-    const requestIdCol = headerMap.get('RequestID');
+    const requestIdCol = headerMap.get('requestid');
+    const auditCol = headerMap.get('audittrail');
 
     for (let i = 1; i < data.length; i++) {
       if (data[i][requestIdCol] === requestId) {
-        const rowData = data[i];
+        sheet.getRange(i + 1, headerMap.get('status') + 1).setValue(action);
+        const userEmail = Session.getActiveUser().getEmail();
+        sheet.getRange(i + 1, headerMap.get('approveremail') + 1).setValue(userEmail);
+        sheet.getRange(i + 1, headerMap.get('approvaltimestamp') + 1).setValue(new Date());
+        sheet.getRange(i + 1, headerMap.get('approvercomments') + 1).setValue(comments || '');
         
-        // Update the status and approver details
-        sheet.getRange(i + 1, headerMap.get('Status') + 1).setValue(action);
-        sheet.getRange(i + 1, headerMap.get('ApproverEmail') + 1).setValue(Session.getActiveUser().getEmail());
-        sheet.getRange(i + 1, headerMap.get('ApprovalTimestamp') + 1).setValue(new Date());
-        sheet.getRange(i + 1, headerMap.get('ApproverComments') + 1).setValue(comments || '');
-
-        if (action === 'Approved') {
-          const requestType = rowData[headerMap.get('RequestType')];
-          let dataToSave = {};
-          let mode = 'edit'; // Default to edit
-
-          // --- IMPLEMENTATION LOGIC ---
-          if (requestType.includes('Transfer') || requestType.includes('Promotion')) {
-            dataToSave = {
-              positionid: rowData[headerMap.get('NewPositionID')],
-              employeeid: rowData[headerMap.get('EmployeeID')],
-              employeename: rowData[headerMap.get('EmployeeName')],
-              status: requestType,
-              startdateinposition: rowData[headerMap.get('EffectiveDate')]
-            };
-          } else if (requestType.includes('replacement for vacancy')) {
-            dataToSave = {
-              positionid: rowData[headerMap.get('VacantPositionID')],
-              employeeid: rowData[headerMap.get('NewEmployeeID')],
-              employeename: rowData[headerMap.get('NewEmployeeName')],
-              status: 'FILLED VACANCY',
-              startdateinposition: rowData[headerMap.get('EffectiveDate')]
-            };
-          } else if (requestType.includes('newly created position')) {
-            const division = rowData[headerMap.get('Division')];
-            const section = rowData[headerMap.get('Section')];
-            const newPositionId = generateNewPositionId(division, section);
-            if (newPositionId.startsWith('ERROR')) {
-              throw new Error('Could not generate new Position ID: ' + newPositionId);
-            }
+        if (auditCol !== undefined) {
+            const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+            let currentLog = data[i][auditCol];
             
-            dataToSave = {
-              positionid: newPositionId,
-              jobtitle: rowData[headerMap.get('NewJobTitle')],
-              level: rowData[headerMap.get('NewLevel')],
-              division: division,
-              group: rowData[headerMap.get('Group')],
-              department: rowData[headerMap.get('Department')],
-              section: section,
-              reportingtoid: rowData[headerMap.get('ReportingToId')],
-              status: 'NEW HIRE',
-              employeename: rowData[headerMap.get('NewEmployeeName')],
-              employeeid: rowData[headerMap.get('NewEmployeeID')],
-            };
-            mode = 'add';
-          }
-          
-          // Call the existing save function to apply the change
-          if (Object.keys(dataToSave).length > 0) {
-            saveEmployeeData(dataToSave, mode);
-            sheet.getRange(i + 1, headerMap.get('ImplementerEmail') + 1).setValue('System');
-            sheet.getRange(i + 1, headerMap.get('ImplementationTimestamp') + 1).setValue(new Date());
-          }
+            // --- FIX: FORCE NEWLINE ---
+            if (currentLog && String(currentLog).length > 0 && !String(currentLog).endsWith('\n')) {
+                currentLog += '\n';
+            } else if (!currentLog) {
+                currentLog = '';
+            }
+
+            const newLogEntry = `[${timestamp}] ${action.toUpperCase()} by ${userEmail}: ${comments || 'No comments'}\n`;
+            sheet.getRange(i + 1, auditCol + 1).setValue(currentLog + newLogEntry);
         }
         
         return `Request ${requestId} has been successfully ${action}.`;
@@ -130,42 +143,509 @@ function processRequestAction(requestId, action, comments) {
     }
     throw new Error(`Request ID ${requestId} not found.`);
   } catch (e) {
-    Logger.log('Error in processRequestAction: ' + e.message);
     throw new Error('Failed to process request action. ' + e.message);
+  }
+}
+
+function logToSheet(message) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let logSheet = ss.getSheetByName("Debug Log");
+  if (!logSheet) {
+    logSheet = ss.insertSheet("Debug Log");
+    logSheet.appendRow(["Timestamp", "Message"]);
+  }
+  const timestamp = new Date();
+  logSheet.appendRow([timestamp, message]);
+}
+
+function implementApprovedChange(requestId) {
+  try {
+    logToSheet(`Starting implementation for request ID: ${requestId}`);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('Org Chart Requests');
+    if (!sheet) {
+      throw new Error('"Org Chart Requests" sheet not found.');
+    }
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    
+    const headerMap = new Map(headers.map((h, i) => [h.toString().toLowerCase().replace(/\s+/g, ''), i]));
+
+    const requestIdCol = headerMap.get('requestid');
+    let requestFound = false;
+    
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][requestIdCol] === requestId) {
+        requestFound = true;
+        const rowData = data[i];
+        
+        const getReqValue = (key) => {
+            const idx = headerMap.get(key.toLowerCase());
+            return idx !== undefined ? rowData[idx] : null;
+        };
+
+        const requestType = getReqValue('requesttype');
+        logToSheet(`Request type: ${requestType}`);
+        
+        let dataToSave = {};
+        let mode = 'edit';
+
+        const mainSheet = ss.getSheets()[0];
+        const mainData = mainSheet.getDataRange().getValues();
+        const mainHeaders = mainData[0];
+        const mainHeaderMap = new Map(mainHeaders.map((h, k) => [h.toString().toLowerCase().replace(/\s+/g, ''), k]));
+        
+        const findCurrentEmployeeRow = (empId) => {
+            const idx = mainHeaderMap.get('employeeid');
+            if (idx === undefined) return null;
+            return mainData.find(r => String(r[idx]).trim() === String(empId).trim());
+        };
+
+        if (requestType.includes('Transfer') || requestType.includes('Promotion')) {
+          let employeeId = getReqValue('employeeid');
+          if (!employeeId) {
+             const currentPosId = getReqValue('currentpositionid');
+             const posIdIdx = mainHeaderMap.get('positionid');
+             const empIdIdx = mainHeaderMap.get('employeeid');
+             if (currentPosId && posIdIdx !== undefined && empIdIdx !== undefined) {
+                 const foundRow = mainData.find(r => r[posIdIdx] === currentPosId);
+                 if (foundRow) employeeId = foundRow[empIdIdx];
+             }
+             if (!employeeId) throw new Error('CRITICAL: Could not find valid EmployeeID.');
+          }
+
+          dataToSave = {
+            positionid: getReqValue('newpositionid'),
+            employeeid: employeeId, 
+            employeename: getReqValue('employeename'),
+            gender: _getEmployeeGender(employeeId), 
+            datehired: getReqValue('datehired'),
+            dateofbirth: getReqValue('dateofbirth'),
+            status: requestType,
+            startdateinposition: getReqValue('effectivedate')
+          };
+
+        } else if (requestType.includes('replacement for vacancy')) {
+          dataToSave = {
+            positionid: getReqValue('vacantpositionid'),
+            status: 'FILLED VACANCY',
+            startdateinposition: getReqValue('effectivedate')
+          };
+
+        } else if (requestType.includes('newly created position')) {
+          const division = getReqValue('division');
+          const section = getReqValue('section');
+          const newPositionId = generateNewPositionId(division, section);
+          if (newPositionId.startsWith('ERROR')) throw new Error(newPositionId);
+          
+          dataToSave = {
+            positionid: newPositionId,
+            jobtitle: getReqValue('newjobtitle'),
+            level: getReqValue('newlevel'),
+            division: division,
+            group: getReqValue('group'),
+            department: getReqValue('department'),
+            section: section,
+            reportingtoid: getReqValue('reportingtoid'),
+            reportingto: getReqValue('reportingto'),
+            status: 'VACANT',
+            positionstatus: 'Active'
+          };
+          mode = 'add';
+
+        } else if (requestType.includes('Resignation/Separation') || requestType.includes('Change in Employment Status') || requestType.includes('Regularization')) {
+            const employeeId = getReqValue('employeeid');
+            if (!employeeId) throw new Error('EmployeeID is required.');
+            
+            const currentRow = findCurrentEmployeeRow(employeeId);
+            if (!currentRow) throw new Error(`Employee ${employeeId} not found in Main Sheet.`);
+            const positionId = currentRow[mainHeaderMap.get('positionid')];
+
+            let newStatus = '';
+            if (requestType.includes('Resignation/Separation')) newStatus = 'RESIGNED';
+            else if (requestType.includes('Regularization')) newStatus = 'REGULAR';
+            else newStatus = getReqValue('newstatus');
+
+            dataToSave = {
+                positionid: positionId,
+                status: newStatus,
+                effectivedate: getReqValue('effectivedate')
+            };
+
+            if (newStatus === 'RESIGNED') {
+                dataToSave.employeeid = employeeId;
+                dataToSave.reasonforleaving = getReqValue('reasonforleaving'); 
+
+                dataToSave.employeename = currentRow[mainHeaderMap.get('employeename')];
+                dataToSave.division = currentRow[mainHeaderMap.get('division')];
+                dataToSave.group = currentRow[mainHeaderMap.get('group')];
+                dataToSave.department = currentRow[mainHeaderMap.get('department')];
+                dataToSave.section = currentRow[mainHeaderMap.get('section')];
+                dataToSave.jobtitle = currentRow[mainHeaderMap.get('jobtitle')];
+                dataToSave.level = currentRow[mainHeaderMap.get('level')];
+                dataToSave.joblevel = currentRow[mainHeaderMap.get('joblevel')];
+                dataToSave.contracttype = currentRow[mainHeaderMap.get('contracttype')];
+                dataToSave.gender = currentRow[mainHeaderMap.get('gender')];
+                dataToSave.datehired = currentRow[mainHeaderMap.get('datehired')];
+                dataToSave.dateofbirth = currentRow[mainHeaderMap.get('dateofbirth')];
+            }
+
+        } else if (requestType.includes('Change in Reporting line')) {
+            const employeeId = getReqValue('employeeid');
+            const currentRow = findCurrentEmployeeRow(employeeId);
+            if (!currentRow) throw new Error('Employee not found.');
+            
+            dataToSave = {
+                positionid: currentRow[mainHeaderMap.get('positionid')],
+                reportingtoid: getReqValue('newreportingtoid'),
+                reportingto: getReqValue('newreportingtoname')
+            };
+
+        } else if (requestType.includes('Job Title/Position Change')) {
+            const employeeId = getReqValue('employeeid');
+            const currentRow = findCurrentEmployeeRow(employeeId);
+            if (!currentRow) throw new Error('Employee not found.');
+
+            dataToSave = {
+                positionid: currentRow[mainHeaderMap.get('positionid')],
+                jobtitle: getReqValue('newjobtitle')
+            };
+
+        } else if (requestType.includes('Name Correction')) {
+            const employeeId = getReqValue('employeeid');
+            const currentRow = findCurrentEmployeeRow(employeeId);
+            if (!currentRow) throw new Error('Employee not found.');
+
+            dataToSave = {
+                positionid: currentRow[mainHeaderMap.get('positionid')],
+                employeename: getReqValue('newemployeename') || getReqValue('newname')
+            };
+
+        } else if (requestType.includes('Position on Hold') || requestType.includes('Cancelled') || requestType.includes('Deleted')) {
+            const positionId = getReqValue('currentpositionid') || getReqValue('positionid');
+            const action = getReqValue('action');
+            if (!positionId || !action) throw new Error('PositionID and Action required.');
+
+            if (action.toUpperCase() === 'DELETED') {
+                deactivatePosition(positionId);
+                sheet.getRange(i + 1, headerMap.get('status') + 1).setValue('Implemented');
+                sheet.getRange(i + 1, headerMap.get('implementeremail') + 1).setValue(Session.getActiveUser().getEmail());
+                sheet.getRange(i + 1, headerMap.get('implementationtimestamp') + 1).setValue(new Date());
+                SpreadsheetApp.flush();
+                return { success: true, message: `Request ${requestId} implemented.` };
+            } else { 
+                dataToSave = {
+                    positionid: positionId,
+                    positionstatus: action
+                };
+            }
+        }
+        
+        if (Object.keys(dataToSave).length > 0) {
+          const saveResult = saveEmployeeData(dataToSave, mode);
+          if (saveResult.includes('successfully')) {
+            sheet.getRange(i + 1, headerMap.get('status') + 1).setValue('Implemented');
+            const userEmail = Session.getActiveUser().getEmail();
+            sheet.getRange(i + 1, headerMap.get('implementeremail') + 1).setValue(userEmail);
+            sheet.getRange(i + 1, headerMap.get('implementationtimestamp') + 1).setValue(new Date());
+            
+            const auditCol = headerMap.get('audittrail');
+            if (auditCol !== undefined) {
+                const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+                let currentLog = rowData[auditCol] || '';
+                
+                // --- FIX: Ensure newline separator ---
+                if (currentLog && !currentLog.endsWith('\n')) {
+                    currentLog += '\n';
+                }
+
+                const newLogEntry = `[${timestamp}] IMPLEMENTED by ${userEmail}\n`;
+                sheet.getRange(i + 1, auditCol + 1).setValue(currentLog + newLogEntry);
+            }
+
+            if (requestType.includes('Name Correction')) {
+                const employeeId = getReqValue('employeeid');
+                const newName = getReqValue('newemployeename') || getReqValue('newname');
+                const repToIdIdx = mainHeaderMap.get('reportingtoid');
+                const repToNameIdx = mainHeaderMap.get('reportingto');
+                if (repToIdIdx !== undefined && repToNameIdx !== undefined) {
+                    for (let k = 1; k < mainData.length; k++) {
+                        if (String(mainData[k][repToIdIdx]) === String(employeeId)) {
+                            mainSheet.getRange(k + 1, repToNameIdx + 1).setValue(newName);
+                        }
+                    }
+                }
+            }
+          } else {
+            throw new Error(`Save failed: ${saveResult}`);
+          }
+        }
+
+        SpreadsheetApp.flush();
+        return { success: true, message: `Request ${requestId} implemented successfully.` };
+      }
+    }
+    if (!requestFound) throw new Error(`Request ID ${requestId} not found.`);
+  } catch (e) {
+    logToSheet('FATAL Error in implementApprovedChange: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+function _getEmployeeGender(employeeId) {
+  if (!employeeId) return '';
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const allSheets = ss.getSheets();
+    let mainSheet = null;
+
+    // Find the correct sheet by looking for key headers
+    for (const sheet of allSheets) {
+      if (sheet.getLastRow() > 0 && sheet.getLastColumn() > 1) {
+        const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+        if (headers.includes('Employee ID') && headers.includes('Gender')) {
+          mainSheet = sheet;
+          break;
+        }
+      }
+    }
+
+    // If no sheet is found, fallback to the first sheet as a last resort.
+    if (!mainSheet) {
+        mainSheet = allSheets[0];
+    }
+
+    const data = mainSheet.getDataRange().getValues();
+    const headers = data[0];
+    const empIdIndex = headers.indexOf('Employee ID');
+    const genderIndex = headers.indexOf('Gender');
+    if (empIdIndex === -1 || genderIndex === -1) return '';
+
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][empIdIndex]).trim() === String(employeeId).trim()) {
+        return data[i][genderIndex] || '';
+      }
+    }
+    return ''; // Return empty string if employee not found
+  } catch (e) {
+    Logger.log(`Error in _getEmployeeGender: ${e.message}`);
+    return ''; // Return empty string on error
+  }
+}
+
+function getRequestCounts() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('Org Chart Requests');
+    if (!sheet || sheet.getLastRow() < 2) {
+      return { myRequestsPending: 0, myRequestsRejected: 0, approvals: 0 };
+    }
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const statusIndex = headers.indexOf('Status');
+    const requestorEmailIndex = headers.indexOf('RequestorEmail');
+    const approverEmailIndex = headers.indexOf('ApproverEmail');
+    const userEmail = Session.getActiveUser().getEmail().toLowerCase().trim();
+
+    let myRequestsPending = 0;
+    let myRequestsRejected = 0;
+    let approvalsCount = 0;
+
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      const status = (row[statusIndex] || '').toString().toLowerCase().trim();
+
+      // Count for "My Requests" tab
+      if ((row[requestorEmailIndex] || '').toString().toLowerCase().trim() === userEmail) {
+        if (status === 'pending') {
+          myRequestsPending++;
+        } else if (status === 'rejected') {
+          myRequestsRejected++;
+        }
+      }
+
+      // Count for "Approvals" tab (only Pending)
+      if (status === 'pending' && (row[approverEmailIndex] || '').toString().toLowerCase().trim() === userEmail) {
+        approvalsCount++;
+      }
+    }
+
+    return { myRequestsPending, myRequestsRejected, approvals: approvalsCount };
+
+  } catch (e) {
+    Logger.log('Error in getRequestCounts: ' + e.message);
+    // In case of error, return zero counts to avoid breaking the UI
+    return { myRequestsPending: 0, myRequestsRejected: 0, approvals: 0 };
   }
 }
 
 function getChangeRequests() {
   try {
+    Logger.log('getChangeRequests function started.');
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName('Org Chart Requests');
     if (!sheet || sheet.getLastRow() < 2) {
-      return { myRequests: [], approvals: [] };
+      Logger.log('Sheet "Org Chart Requests" not found or empty.');
+      return JSON.stringify({ myRequests: [], approvals: [] });
     }
     const data = sheet.getDataRange().getValues();
     const headers = data.shift();
-    const userEmail = Session.getActiveUser().getEmail();
-    const supportDocIndex = headers.indexOf('SupportingDocuments');
+    const userEmail = Session.getActiveUser().getEmail().toLowerCase().trim();
+    Logger.log('User Email: ' + userEmail);
+    Logger.log('Headers: ' + headers.join(', '));
 
+
+    // First, process all rows into a standardized 'requests' array
     const requests = data.map(row => {
-      const request = {};
+      let request = {};
       headers.forEach((header, i) => {
-        if (i === supportDocIndex && row[i]) {
-          request[header] = `<a href="${row[i]}" target="_blank">View Documents</a>`;
-        } else {
-          request[header] = row[i];
+        let value = row[i];
+        // Standardize date formats upfront
+        if (header.toLowerCase().includes('date') && value instanceof Date) {
+            value = Utilities.formatDate(new Date(value), Session.getScriptTimeZone(), "yyyy-MM-dd");
         }
+        request[header.replace(/\s+/g, '')] = value;
       });
       return request;
     });
 
-    const myRequests = requests.filter(r => r.RequestorEmail === userEmail);
-    const approvals = requests.filter(r => r.Status === 'Pending' && r.ApproverEmail === userEmail); 
+    // Find the actual keys for email columns, case-insensitively
+    const requestorKey = headers.find(h => (h || '').toLowerCase().replace(/\s+/g, '') === 'requestoremail')?.replace(/\s+/g, '');
+    const approverKey = headers.find(h => (h || '').toLowerCase().replace(/\s+/g, '') === 'approveremail')?.replace(/\s+/g, '');
 
-    return { myRequests, approvals };
+    Logger.log(`Dynamically found keys -> Requestor: '${requestorKey}', Approver: '${approverKey}'`);
+
+    if (!approverKey) {
+      Logger.log('CRITICAL: Could not find a valid ApproverEmail key from headers. Filtering will fail.');
+    }
+
+    // Filter for 'My Requests'
+    const myRequests = requests.filter(r => 
+      (r[requestorKey] || '').toString().toLowerCase().trim() === userEmail
+    );
+
+    const approvals = requests.filter(r => {
+      const approverEmail = (r[approverKey] || '').toString().toLowerCase().trim();
+      // This log is still useful for checking the actual values
+      Logger.log(`Checking row: Value in column '${approverKey}' is '${approverEmail}'. Match with '${userEmail}': ${approverEmail === userEmail}`);
+      return approverEmail === userEmail;
+    });
+
+    // Sort both lists by submission timestamp, newest first
+    const sortByTimestampDesc = (a, b) => {
+        const dateA = new Date(a.SubmissionTimestamp || 0);
+        const dateB = new Date(b.SubmissionTimestamp || 0);
+        return dateB - dateA;
+    };
+
+    myRequests.sort(sortByTimestampDesc);
+    approvals.sort(sortByTimestampDesc);
+
+    // Create the final object with formatted link fields for the frontend
+    const resultObject = {
+        myRequests: myRequests.map(r => ({
+            ...r,
+            JiraTicket: r.JiraTicket ? `<a href="${r.JiraTicket}" target="_blank">${r.JiraTicket.substring(r.JiraTicket.lastIndexOf('/') + 1)}</a>` : 'N/A',
+            SupportingDocuments: r.SupportingDocuments ? `<a href="${r.SupportingDocuments}" target="_blank">View</a>` : 'N/A'
+        })),
+        approvals: approvals.map(r => ({
+            ...r,
+            JiraTicket: r.JiraTicket ? `<a href="${r.JiraTicket}" target="_blank">${r.JiraTicket.substring(r.JiraTicket.lastIndexOf('/') + 1)}</a>` : 'N/A',
+            SupportingDocuments: r.SupportingDocuments ? `<a href="${r.SupportingDocuments}" target="_blank">View</a>` : 'N/A'
+        }))
+    };
+    
+    Logger.log('getChangeRequests function finished successfully. Found ' + myRequests.length + ' myRequests and ' + approvals.length + ' approvals.');
+    return JSON.stringify(resultObject);
+
   } catch (e) {
-    Logger.log('Error in getChangeRequests: ' + e.message);
-    throw new Error('Failed to retrieve change requests. ' + e.message);
+    Logger.log('FATAL Error in getChangeRequests: ' + e.message + ' Stack: ' + e.stack);
+    // Return a valid empty object on error to prevent frontend from breaking
+    return JSON.stringify({ myRequests: [], approvals: [] });
+  }
+}
+
+
+function getEmployeeDetails(employeeName) {
+  if (!employeeName) {
+    return null;
+  }
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const mainSheet = ss.getSheets()[0];
+    if (mainSheet.getLastRow() < 2) {
+      return null;
+    }
+    const data = mainSheet.getRange(2, 1, mainSheet.getLastRow() - 1, mainSheet.getLastColumn()).getValues();
+    const headers = mainSheet.getRange(1, 1, 1, mainSheet.getLastColumn()).getValues()[0];
+    const empNameIndex = headers.indexOf('Employee Name');
+    const empIdIndex = headers.indexOf('Employee ID');
+    const dateHiredIndex = headers.indexOf('Date Hired');
+    const dobIndex = headers.indexOf('Date of Birth');
+    const genderIndex = headers.indexOf('Gender');
+
+    if (empNameIndex === -1 || empIdIndex === -1 || dateHiredIndex === -1 || dobIndex === -1) {
+      return null;
+    }
+
+    const employeeRow = data.find(row => (row[empNameIndex] || '').toString().trim() === employeeName.trim());
+
+    if (employeeRow) {
+      const dateHired = employeeRow[dateHiredIndex] instanceof Date ? Utilities.formatDate(employeeRow[dateHiredIndex], Session.getScriptTimeZone(), 'yyyy-MM-dd') : null;
+      const dateOfBirth = employeeRow[dobIndex] instanceof Date ? Utilities.formatDate(employeeRow[dobIndex], Session.getScriptTimeZone(), 'yyyy-MM-dd') : null;
+      return {
+        employeeId: employeeRow[empIdIndex],
+        dateHired: dateHired,
+        dateOfBirth: dateOfBirth,
+        gender: employeeRow[genderIndex]
+      };
+    }
+    return null;
+  } catch (e) {
+    Logger.log(`Error in getEmployeeDetails: ${e.toString()}`);
+    return null;
+  }
+}
+
+
+function getLastIncumbentInfo(positionId) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const logSheet = ss.getSheetByName('change_log_sheet');
+    if (!logSheet || logSheet.getLastRow() < 2) {
+      return { dateBecameVacant: null };
+    }
+
+    const logData = logSheet.getDataRange().getValues();
+    const headers = logData.shift();
+    const posIdIndex = headers.indexOf('Position ID');
+    const empIdIndex = headers.indexOf('Employee ID');
+    const effectiveDateIndex = headers.indexOf('Effective Date');
+    const timestampIndex = headers.indexOf('Change Timestamp');
+
+    if (posIdIndex === -1 || empIdIndex === -1 || effectiveDateIndex === -1 || timestampIndex === -1) {
+      return { dateBecameVacant: null };
+    }
+
+    const relevantEvents = logData
+      .filter(row => row[posIdIndex] === positionId && row[empIdIndex]) // Find all events for this position with an incumbent
+      .map(row => new Date(row[effectiveDateIndex] || row[timestampIndex])) // Get the date
+      .filter(date => !isNaN(date.getTime())); // Filter out invalid dates
+
+    if (relevantEvents.length === 0) {
+      return { dateBecameVacant: null };
+    }
+
+    // Sort descending to get the most recent date
+    relevantEvents.sort((a, b) => b.getTime() - a.getTime());
+
+    const lastDate = Utilities.formatDate(relevantEvents[0], Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    
+    return { dateBecameVacant: lastDate };
+
+  } catch (e) {
+    Logger.log(`Error in getLastIncumbentInfo: ${e.toString()}`);
+    return { dateBecameVacant: null };
   }
 }
 
@@ -314,18 +794,18 @@ function handleSheetChange(e) {
   if (['EDIT', 'INSERT_ROW', 'REMOVE_ROW'].indexOf(e.changeType) === -1) {
     return;
   }
-  // --- FIX: Check for the lock and exit if it's active ---
-  const scriptProperties = PropertiesService.getScriptProperties();
-  if (scriptProperties.getProperty('scriptChangeLock')) {
-    Logger.log('Skipping handleSheetChange because scriptChangeLock is active.');
-    return;
-  }
   const lock = LockService.getScriptLock();
-  try {
-    lock.waitLock(15000);
-    logDataChanges();
-  } finally {
-    lock.releaseLock();
+  // Attempt to acquire the lock for a short period.
+  // If it fails, it means another process (like implementApprovedChange) is holding it.
+  // In that case, we should exit and let the main process handle the logic.
+  if (lock.tryLock(500)) {
+    try {
+      logDataChanges();
+    } finally {
+      lock.releaseLock();
+    }
+  } else {
+    Logger.log('Skipping handleSheetChange because another process is holding the lock.');
   }
 }
 
@@ -371,7 +851,7 @@ function logDataChanges() {
 
   let timestamp = new Date();
   if (overrideTimestamp) {
-    timestamp = new Date(overrideTimestamp + 'T12:00:00');
+    timestamp = new Date(overrideTimestamp);
     scriptProperties.deleteProperty('overrideTimestamp');
   }
 
@@ -537,176 +1017,168 @@ function takeHeadcountSnapshotWithAlert() {
 
 
 function takeHeadcountSnapshot() {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const mainSheet = spreadsheet.getSheets()[0];
-  let targetSheet = spreadsheet.getSheetByName('Previous Headcount');
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const mainSheet = spreadsheet.getSheets()[0];
+  let targetSheet = spreadsheet.getSheetByName('Previous Headcount');
 
-  if (!targetSheet) {
-    targetSheet = spreadsheet.insertSheet('Previous Headcount');
-    targetSheet.appendRow(['Division', 'Group', 'Department', 'Section', 'Approved Plantilla']);
-    targetSheet.setFrozenRows(1);
-  }
+  if (!targetSheet) {
+    targetSheet = spreadsheet.insertSheet('Previous Headcount');
+    targetSheet.appendRow(['Division', 'Group', 'Department', 'Section', 'Approved Plantilla']);
+    targetSheet.setFrozenRows(1);
+  }
 
-  if (mainSheet.getLastRow() < 2) {
-    return;
-  }
+  if (mainSheet.getLastRow() < 2) return;
 
-  const scriptProperties = PropertiesService.getScriptProperties();
-  const currentSnapshot = scriptProperties.getProperty('snapshotTimestamp');
-  if (currentSnapshot) {
-    scriptProperties.setProperty('previousHeadcountTimestamp', currentSnapshot);
-  }
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const currentSnapshot = scriptProperties.getProperty('snapshotTimestamp');
+  if (currentSnapshot) {
+    scriptProperties.setProperty('previousHeadcountTimestamp', currentSnapshot);
+  }
 
-  const timestamp = new Date();
-  scriptProperties.setProperty('snapshotTimestamp', timestamp.toISOString());
+  const timestamp = new Date();
+  scriptProperties.setProperty('snapshotTimestamp', timestamp.toISOString());
 
-  const data = mainSheet.getRange(2, 1, mainSheet.getLastRow() - 1, 18).getValues();
-  const approvalsSheet = spreadsheet.getSheetByName('Approvals');
-  if (!approvalsSheet) {
-    throw new Error('Sheet "Approvals" not found.');
-  }
+  // --- DYNAMIC HEADER MAPPING ---
+  const lastCol = mainSheet.getLastColumn();
+  const allRows = mainSheet.getRange(1, 1, mainSheet.getLastRow(), lastCol).getValues();
+  const headers = allRows.shift().map(h => String(h).trim().toLowerCase().replace(/\s+/g, ''));
+  const data = allRows;
 
-  const approversData = getApproversData();
-  const uniqueDepartments = [...new Set(data.map(row => row[8]).filter(String))];
-  const existingApprovalRecords = approvalsSheet.getDataRange().getValues();
-  const headers = existingApprovalRecords.length > 0 ? existingApprovalRecords[0] : [];
-  const snapshotColIndex = headers.indexOf('Snapshot Date');
-  const deptColIndex = headers.indexOf('Department');
-  const newlyCreatedRecords = [];
+  // Helper to find column index
+  const idx = (name) => headers.indexOf(name.toLowerCase().replace(/\s+/g, ''));
+  
+  const colDiv = idx('division');
+  const colGrp = idx('group');
+  const colDept = idx('department');
+  const colSect = idx('section');
+  const colStatus = idx('positionstatus');
+  const colEmpId = idx('employeeid');
 
-  uniqueDepartments.forEach(dept => {
-    const recordExists = existingApprovalRecords.some((row, index) =>
-      index > 0 && row[snapshotColIndex] === timestamp.toISOString() && row[deptColIndex] === dept
-    );
-    if (!recordExists) {
-      approvalsSheet.appendRow([timestamp.toISOString(), dept, '', '', '', '', '', '', '', '']);
-      newlyCreatedRecords.push(dept);
-    }
-  });
+  if (colDiv === -1) throw new Error("Could not find 'Division' column in main sheet.");
 
-  newlyCreatedRecords.forEach(dept => {
-    sendApprovalNotificationEmail(dept, timestamp.toISOString(), approversData, 'Prepared By');
-  });
+  const approvalsSheet = spreadsheet.getSheetByName('Approvals');
+  if (!approvalsSheet) throw new Error('Sheet "Approvals" not found.');
 
-  const summary = {};
-  data.forEach(function (row) {
-    if ((row[17] || '').toString().trim().toLowerCase() === 'inactive') return;
-    const isFilled = !!row[1];
-    const division = row[6],
-      group = row[7] || '', // Ensure blank values are treated as empty strings
-      department = row[8] || '',
-      section = row[9] || '';
+  const approversData = getApproversData();
+  const uniqueDepartments = [...new Set(data.map(row => row[colDept]).filter(String))];
+  
+  const existingApprovalRecords = approvalsSheet.getDataRange().getValues();
+  const appHeaders = existingApprovalRecords.length > 0 ? existingApprovalRecords[0] : [];
+  const snapshotColIndex = appHeaders.indexOf('Snapshot Date');
+  const deptColIndex = appHeaders.indexOf('Department');
+  const newlyCreatedRecords = [];
 
-    if (!division) return;
-    if (!summary[division]) summary[division] = {
-      filled: 0,
-      vacant: 0,
-      groups: {}
-    };
-    if (!summary[division].groups[group]) summary[division].groups[group] = {
-      filled: 0,
-      vacant: 0,
-      departments: {}
-    };
-    if (!summary[division].groups[group].departments[department]) summary[division].groups[group].departments[department] = {
-      filled: 0,
-      vacant: 0,
-      sections: {}
-    };
-    if (!summary[division].groups[group].departments[department].sections[section]) summary[division].groups[group].departments[department].sections[section] = {
-      filled: 0,
-      vacant: 0
-    };
+  uniqueDepartments.forEach(dept => {
+    const recordExists = existingApprovalRecords.some((row, index) =>
+      index > 0 && row[snapshotColIndex] === timestamp.toISOString() && row[deptColIndex] === dept
+    );
+    if (!recordExists) {
+      approvalsSheet.appendRow([timestamp.toISOString(), dept, '', '', '', '', '', '', '', '']);
+      newlyCreatedRecords.push(dept);
+    }
+  });
 
-    isFilled ? summary[division].filled++ : summary[division].vacant++;
-    isFilled ? summary[division].groups[group].filled++ : summary[division].groups[group].vacant++;
-    isFilled ? summary[division].groups[group].departments[department].filled++ : summary[division].groups[group].departments[department].vacant++;
-    isFilled ? summary[division].groups[group].departments[department].sections[section].filled++ : summary[division].groups[group].departments[department].sections[section].vacant++;
-  });
+  newlyCreatedRecords.forEach(dept => {
+    sendApprovalNotificationEmail(dept, timestamp.toISOString(), approversData, 'Prepared By');
+  });
 
+  const summary = {};
 
-  const monthHeader = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), "MMM yyyy");
-  const filledHeader = `${monthHeader} Filled`;
-  const vacantHeader = `${monthHeader} Vacant`;
+  data.forEach(function (row) {
+    const pStatus = (colStatus > -1) ? (row[colStatus] || '') : '';
+    if (pStatus.toString().trim().toLowerCase() === 'inactive') return;
 
-  const targetHeaders = targetSheet.getRange(1, 1, 1, targetSheet.getLastColumn()).getValues()[0];
-  let filledColIdx = targetHeaders.indexOf(filledHeader);
-  let vacantColIdx = targetHeaders.indexOf(vacantHeader);
-  let plantillaColIdx = targetHeaders.indexOf('Approved Plantilla');
+    const isFilled = (colEmpId > -1 && row[colEmpId]);
+    const division = row[colDiv];
+    const group = (colGrp > -1) ? (row[colGrp] || '') : '';
+    const department = (colDept > -1) ? (row[colDept] || '') : '';
+    const section = (colSect > -1) ? (row[colSect] || '') : '';
 
-  if (plantillaColIdx === -1) {
-    targetSheet.getRange(1, 5).setValue('Approved Plantilla');
-    plantillaColIdx = 4;
-  }
+    if (!division) return;
 
-  if (filledColIdx === -1) {
-    const lastCol = targetSheet.getLastColumn();
-    targetSheet.getRange(1, lastCol + 1, 1, 2).setValues([
-      [filledHeader, vacantHeader]
-    ]);
-    filledColIdx = lastCol;
-    vacantColIdx = lastCol + 1;
-  }
+    if (!summary[division]) summary[division] = { filled: 0, vacant: 0, groups: {} };
+    if (!summary[division].groups[group]) summary[division].groups[group] = { filled: 0, vacant: 0, departments: {} };
+    if (!summary[division].groups[group].departments[department]) summary[division].groups[group].departments[department] = { filled: 0, vacant: 0, sections: {} };
+    if (!summary[division].groups[group].departments[department].sections[section]) summary[division].groups[group].departments[department].sections[section] = { filled: 0, vacant: 0 };
 
-  const existingData = targetSheet.getLastRow() > 1 ? targetSheet.getRange(2, 1, targetSheet.getLastRow() - 1, targetSheet.getLastColumn()).getValues() : [];
-  const dataMap = new Map();
-  existingData.forEach((row, index) => {
-    const key = [row[0], row[1], row[2], row[3]].join('|');
-    dataMap.set(key, {
-      rowIndex: index + 2,
-      data: row
-    });
-  });
+    if (isFilled) {
+      summary[division].filled++;
+      summary[division].groups[group].filled++;
+      summary[division].groups[group].departments[department].filled++;
+      summary[division].groups[group].departments[department].sections[section].filled++;
+    } else {
+      summary[division].vacant++;
+      summary[division].groups[group].vacant++;
+      summary[division].groups[group].departments[department].vacant++;
+      summary[division].groups[group].departments[department].sections[section].vacant++;
+    }
+  });
 
-  const updatedData = [];
+  const monthHeader = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), "MMM yyyy");
+  const filledHeader = `${monthHeader} Filled`;
+  const vacantHeader = `${monthHeader} Vacant`;
 
-  const processLevel = (div, group, dept, sec, counts) => {
-    const key = [div, group, dept, sec].join('|');
-    if (dataMap.has(key)) {
-      const existingRow = dataMap.get(key);
-      existingRow.data[filledColIdx] = counts.filled;
-      existingRow.data[vacantColIdx] = counts.vacant;
-      updatedData.push({
-        range: `A${existingRow.rowIndex}`,
-        values: [existingRow.data]
-      });
-      dataMap.delete(key);
-    } else {
-      const newRow = Array(targetSheet.getLastColumn()).fill('');
-      newRow[0] = div;
-      newRow[1] = group;
-      newRow[2] = dept;
-      newRow[3] = sec;
-      newRow[filledColIdx] = counts.filled;
-      newRow[vacantColIdx] = counts.vacant;
-      targetSheet.appendRow(newRow);
-    }
-  };
+  const targetHeaders = targetSheet.getRange(1, 1, 1, targetSheet.getLastColumn()).getValues()[0];
+  let filledColIdx = targetHeaders.indexOf(filledHeader);
+  let vacantColIdx = targetHeaders.indexOf(vacantHeader);
+  let plantillaColIdx = targetHeaders.indexOf('Approved Plantilla');
+  if (plantillaColIdx === -1) plantillaColIdx = 4; 
 
-  // --- REVISED SECTION ---
-  // This revised logic filters out empty keys ('') before processing,
-  // preventing the creation of blank or incomplete rows in the "Previous Headcount" sheet.
-  Object.keys(summary).sort().forEach(divName => {
-    processLevel(divName, '', '', '', summary[divName]); // Process Division total
-    Object.keys(summary[divName].groups).sort().filter(g => g).forEach(groupName => { // Filter out empty group names
-      processLevel(divName, groupName, '', '', summary[divName].groups[groupName]); // Process Group total
-      Object.keys(summary[divName].groups[groupName].departments).sort().filter(d => d).forEach(deptName => { // Filter out empty dept names
-        processLevel(divName, groupName, deptName, '', summary[divName].groups[groupName].departments[deptName]); // Process Dept total
-        Object.keys(summary[divName].groups[groupName].departments[deptName].sections).sort().filter(s => s).forEach(secName => { // Filter out empty section names
-          processLevel(divName, groupName, deptName, secName, summary[divName].groups[groupName].departments[deptName].sections[secName]); // Process Section total
-        });
-      });
-    });
-  });
-  // --- END REVISED SECTION ---
+  if (filledColIdx === -1) {
+    const lastCol = targetSheet.getLastColumn();
+    targetSheet.getRange(1, lastCol + 1, 1, 2).setValues([[filledHeader, vacantHeader]]);
+    filledColIdx = lastCol;
+    vacantColIdx = lastCol + 1;
+  }
 
-  updatedData.forEach(update => {
-    const range = targetSheet.getRange(update.range).offset(0, 0, 1, update.values[0].length);
-    range.setValues(update.values);
-  });
+  const existingData = targetSheet.getLastRow() > 1 ? targetSheet.getRange(2, 1, targetSheet.getLastRow() - 1, targetSheet.getLastColumn()).getValues() : [];
+  const dataMap = new Map();
+  
+  existingData.forEach((row, index) => {
+    const key = [row[0], row[1], row[2], row[3]].join('|');
+    dataMap.set(key, { rowIndex: index + 2, data: row });
+  });
+
+  const updatedData = [];
+
+  const processLevel = (div, group, dept, sec, counts) => {
+    const key = [div, group, dept, sec].join('|');
+    if (dataMap.has(key)) {
+      const existingRow = dataMap.get(key);
+      existingRow.data[filledColIdx] = counts.filled;
+      existingRow.data[vacantColIdx] = counts.vacant;
+      updatedData.push({ range: `A${existingRow.rowIndex}`, values: [existingRow.data] });
+      dataMap.delete(key);
+    } else {
+      const newRow = Array(targetSheet.getLastColumn()).fill('');
+      newRow[0] = div;
+      newRow[1] = group;
+      newRow[2] = dept;
+      newRow[3] = sec;
+      newRow[filledColIdx] = counts.filled;
+      newRow[vacantColIdx] = counts.vacant;
+      targetSheet.appendRow(newRow);
+    }
+  };
+
+  Object.keys(summary).sort().forEach(divName => {
+    processLevel(divName, '', '', '', summary[divName]);
+    Object.keys(summary[divName].groups).sort().filter(g => g).forEach(groupName => {
+      processLevel(divName, groupName, '', '', summary[divName].groups[groupName]);
+      Object.keys(summary[divName].groups[groupName].departments).sort().filter(d => d).forEach(deptName => {
+        processLevel(divName, groupName, deptName, '', summary[divName].groups[groupName].departments[deptName]);
+        Object.keys(summary[divName].groups[groupName].departments[deptName].sections).sort().filter(s => s).forEach(secName => {
+          processLevel(divName, groupName, deptName, secName, summary[divName].groups[groupName].departments[deptName].sections[secName]);
+        });
+      });
+    });
+  });
+
+  updatedData.forEach(update => {
+    const range = targetSheet.getRange(update.range).offset(0, 0, 1, update.values[0].length);
+    range.setValues(update.values);
+  });
 }
-
-
 function getApproversData() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   const approversSheet = spreadsheet.getSheetByName('Approvers');
@@ -751,12 +1223,6 @@ function sendApprovalNotificationEmail(department, snapshotTimestamp, allApprove
   }
 }
 
-
-function doGet(e) {
-  return HtmlService.createTemplateFromFile('Index').evaluate().setTitle('Interactive Organizational Chart').setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
-}
-
-
 function getIncumbencyHistory() {
   const scriptProperties = PropertiesService.getScriptProperties();
   const historyString = scriptProperties.getProperty('incumbencyHistory');
@@ -768,29 +1234,29 @@ function getEmployeeData() {
   try {
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
     const userEmail = Session.getActiveUser().getEmail().toLowerCase();
-    const mainSheet = spreadsheet.getSheets()[0];
+    const mainSheet = spreadsheet.getSheets()[0]; 
 
-
+    // 1. Fetch Permissions
+    const permissions = getSessionPermissions();
+    // 2. Fetch Resignation Data
     const logSheet = spreadsheet.getSheetByName('change_log_sheet');
     const resignationDates = new Map();
     if (logSheet && logSheet.getLastRow() > 1) {
-      const logData = logSheet.getRange(2, 1, logSheet.getLastRow() - 1, logSheet.getLastColumn()).getValues();
-      const headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
-      const posIdIndex = headers.indexOf('Position ID');
-      const statusIndex = headers.indexOf('Status');
-      const effectiveDateIndex = headers.indexOf('Effective Date');
-
-
-      if (posIdIndex > -1 && statusIndex > -1 && effectiveDateIndex > -1) {
+      const logData = logSheet.getDataRange().getValues();
+      const logHeaders = logData.shift().map(h => String(h).trim().toLowerCase());
+      const posIdIdx = logHeaders.indexOf('position id');
+      const statusIdx = logHeaders.indexOf('status');
+      const dateIdx = logHeaders.indexOf('effective date');
+      if (posIdIdx > -1 && statusIdx > -1 && dateIdx > -1) {
         logData.forEach(row => {
-          if (row[posIdIndex] && String(row[statusIndex]).toUpperCase() === 'RESIGNED' && row[effectiveDateIndex] instanceof Date) {
-            resignationDates.set(row[posIdIndex], row[effectiveDateIndex]);
+          if (row[posIdIdx] && String(row[statusIdx]).toUpperCase() === 'RESIGNED' && row[dateIdx] instanceof Date) {
+            resignationDates.set(row[posIdIdx], row[dateIdx]);
           }
         });
       }
     }
 
-
+    // 3. Fetch User Field Permissions
     const userPermissions = {};
     const permissionsSheet = spreadsheet.getSheetByName('Permissions');
     if (permissionsSheet) {
@@ -802,67 +1268,72 @@ function getEmployeeData() {
           const userRow = permData.find(row => row[emailColIndex] && row[emailColIndex].toString().trim().toLowerCase() === userEmail);
           if (userRow) {
             permissionHeaders.forEach((header, index) => {
-              if (header) {
-                userPermissions[header.trim()] = userRow[index] ? userRow[index].toString().trim().toLowerCase() : '';
-              }
+              if (header) userPermissions[header.trim()] = userRow[index] ? userRow[index].toString().trim().toLowerCase() : '';
             });
           }
         }
       }
     }
+
     const isFieldAuthorized = (fieldName) => (userPermissions[fieldName] === 'x' || userPermissions[fieldName] === 'all' || userPermissions[fieldName] === 'anyone');
-    const isDepartmentViewable = (employeeDivision, employeeDepartment) => {
+    // Permission Scope Check
+    const isDepartmentViewable = (div, grp, dept, sect) => {
       const viewableDeptEntry = userPermissions['Viewable Department'] || '';
       if (viewableDeptEntry === 'all' || viewableDeptEntry === 'anyone') return true;
-      const allowedDeptDivs = viewableDeptEntry.split(',').map(item => item.trim().toLowerCase()).filter(item => item);
-      return allowedDeptDivs.includes(employeeDepartment.toLowerCase()) || allowedDeptDivs.includes(employeeDivision.toLowerCase());
+      const allowedScopes = viewableDeptEntry.split(',').map(item => item.trim().toLowerCase()).filter(item => item);
+      return allowedScopes.includes((div || '').toLowerCase()) ||
+             allowedScopes.includes((grp || '').toLowerCase()) ||
+             allowedScopes.includes((dept || '').toLowerCase()) ||
+             allowedScopes.includes((sect || '').toLowerCase());
     };
     const canEdit = userPermissions['Can Edit'] === 'x' || userPermissions['Can Edit'] === 'all' || userPermissions['Can Edit'] === 'anyone';
     const canApprove = userPermissions['Is Approver'] === 'x' || userPermissions['Is Approver'] === 'all' || userPermissions['Is Approver'] === 'anyone';
-
-
+    // 4. Fetch Main Data
     if (mainSheet.getLastRow() < 2) {
-      return {
-        current: [], previous: {}, snapshotTimestamp: null, currentUserEmail: userEmail,
-        userCanSeeAnyDepartment: false, totalApprovedPlantilla: 0, previousDateString: null, canEdit: canEdit, canApprove: canApprove
-      };
+      return { current: [], previous: {}, snapshotTimestamp: null, currentUserEmail: userEmail, canEdit: canEdit, canApprove: canApprove, canViewCompetency: false, totalApprovedPlantilla: 0 };
     }
 
+    const lastCol = Math.max(25, mainSheet.getLastColumn()); 
+    const allRows = mainSheet.getRange(1, 1, mainSheet.getLastRow(), lastCol).getValues();
+    const headers = allRows.shift();
+    const mainData = allRows;
 
-    const lastCol = Math.max(21, mainSheet.getLastColumn());
-    const mainData = mainSheet.getRange(2, 1, mainSheet.getLastRow() - 1, lastCol).getValues();
+    const h = new Map(headers.map((name, i) => [String(name).trim().toLowerCase().replace(/\s+/g, ''), i]));
+    const val = (row, headerName) => {
+        const idx = h.get(headerName.toLowerCase().replace(/\s+/g, ''));
+        return (idx !== undefined) ? row[idx] : null;
+    };
+
+    // 5. Pre-process Data Maps
     const employeeIdToPositionIdMap = new Map();
-
-    // --- START OPTIMIZATION ---
-    // In-line the logic from getListsForDropdowns to avoid a second sheet read and multiple loops.
+    const allEmployeesMap = new Map(); 
     const activeEmployees = [];
     const divisions = new Set();
     const groups = new Set();
     const departments = new Set();
     const sections = new Set();
-
     mainData.forEach(row => {
-      const employeeId = row[1] ? row[1].toString().trim() : null;
-      const positionId = row[0] ? row[0].toString().trim() : null;
-      if (employeeId && positionId) {
-        employeeIdToPositionIdMap.set(employeeId, positionId);
+      const empId = val(row, 'Employee ID') ? String(val(row, 'Employee ID')).trim() : null;
+      const posId = val(row, 'Position ID') ? String(val(row, 'Position ID')).trim() : null;
+      
+      if (posId) allEmployeesMap.set(posId, row);
+      if (empId && posId) employeeIdToPositionIdMap.set(empId, posId);
+      
+      if (empId && (val(row, 'Position Status') || '').toLowerCase() !== 'inactive') {
+          activeEmployees.push({ id: empId, name: val(row, 'Employee Name') });
       }
-      // Populate dropdown list data in the same loop
-      if (employeeId && (row[17] || '').toLowerCase() !== 'inactive') {
-          activeEmployees.push({ id: employeeId, name: row[2] });
-      }
-      if(row[6]) divisions.add(row[6]);
-      if(row[7]) groups.add(row[7]);
-      if(row[8]) departments.add(row[8]);
-      if(row[9]) sections.add(row[9]);
+      
+      const div = val(row, 'Division'); if(div) divisions.add(div);
+      const grp = val(row, 'Group'); if(grp) groups.add(grp);
+      const dept = val(row, 'Department'); if(dept) departments.add(dept);
+      const sect = val(row, 'Section'); if(sect) sections.add(sect);
     });
-
     const refSheet = spreadsheet.getSheetByName("Reference Data");
     let staticLists = {};
     if (refSheet) {
         const refData = refSheet.getDataRange().getValues();
-        const headers = refData.shift();
-        headers.forEach((header, colIndex) => {
+        const refHeaders = refData.shift();
+        refHeaders.forEach((header, colIndex) => {
             if (header) {
                 const key = header.toLowerCase().replace(/\s+/g, '').replace(/[^a-z0-9]/gi, '');
                 const values = refData.map(row => row[colIndex]).filter(String).sort();
@@ -879,22 +1350,25 @@ function getEmployeeData() {
         sections: [...sections].sort(),
         ...staticLists
     };
-    // --- END OPTIMIZATION ---
-
     const historicalNotes = getHistoricalNotes();
     const incumbencyHistory = getIncumbencyHistory();
     const employeesToShow = [];
     let hasReturnedAnyEmployee = false;
+    // 6. Main Loop - Filter Viewable Employees
     mainData.forEach(function (row) {
-      const employeeDivision = row[6] ? row[6].toString().trim() : '';
-      const employeeDepartment = row[8] ? row[8].toString().trim() : '';
-      if (!isDepartmentViewable(employeeDivision, employeeDepartment)) return;
-      hasReturnedAnyEmployee = true;
-      const posId = row[0] ? row[0].toString().trim() : null;
+      const posId = val(row, 'Position ID');
       if (!posId) return;
 
+      const div = val(row, 'Division') ? String(val(row, 'Division')).trim() : '';
+      const grp = val(row, 'Group') ? String(val(row, 'Group')).trim() : '';
+      const dept = val(row, 'Department') ? String(val(row, 'Department')).trim() : '';
+      const sect = val(row, 'Section') ? String(val(row, 'Section')).trim() : '';
+      
+      if (!isDepartmentViewable(div, grp, dept, sect)) return;
+      
+      hasReturnedAnyEmployee = true;
 
-      const managerEmployeeId = row[3] ? row[3].toString().trim() : null;
+      const managerEmployeeId = val(row, 'Reporting to ID') ? String(val(row, 'Reporting to ID')).trim() : null;
       let managerPositionId = ''; 
       if (managerEmployeeId) {
         if (managerEmployeeId.includes('-')) {
@@ -902,19 +1376,20 @@ function getEmployeeData() {
         } else {
           managerPositionId = employeeIdToPositionIdMap.get(managerEmployeeId) || '';
         }
-        if (!managerPositionId) {
-            Logger.log(`Could not find manager position for employee ${row[2]} (Emp ID: ${row[1]}) who has manager ID: ${managerEmployeeId}`);
-        }
       }
 
       const history = historicalNotes[posId] || {};
       history.lastIncumbents = incumbencyHistory[posId] || [];
 
-      let dateHired = row[18] && row[18] instanceof Date ? Utilities.formatDate(row[18], Session.getScriptTimeZone(), 'yyyy-MM-dd') : null;
-      let dateOfBirth = row[19] && row[19] instanceof Date ? Utilities.formatDate(row[19], Session.getScriptTimeZone(), 'yyyy-MM-dd') : null;
-      let contractEndDate = row[20] && row[20] instanceof Date ? Utilities.formatDate(row[20], Session.getScriptTimeZone(), 'yyyy-MM-dd') : null;
+      const dHired = val(row, 'Date Hired');
+      const dBirth = val(row, 'Date of Birth');
+      const dEnd = val(row, 'Contract End Date');
+      
+      let dateHired = dHired instanceof Date ? Utilities.formatDate(dHired, Session.getScriptTimeZone(), 'yyyy-MM-dd') : null;
+      let dateOfBirth = dBirth instanceof Date ? Utilities.formatDate(dBirth, Session.getScriptTimeZone(), 'yyyy-MM-dd') : null;
+      let contractEndDate = dEnd instanceof Date ? Utilities.formatDate(dEnd, Session.getScriptTimeZone(), 'yyyy-MM-dd') : null;
 
-      const employeeStatus = row[16] ? row[16].toString().trim() : '';
+      const employeeStatus = val(row, 'Status') ? String(val(row, 'Status')).trim() : '';
       let resignationDate = null;
       if (employeeStatus.toUpperCase() === 'RESIGNED' && resignationDates.has(posId)) {
         resignationDate = Utilities.formatDate(resignationDates.get(posId), Session.getScriptTimeZone(), 'yyyy-MM-dd');
@@ -922,39 +1397,99 @@ function getEmployeeData() {
 
       employeesToShow.push({
         positionId: posId,
-        employeeId: row[1] ? row[1].toString().trim() : null,
+        employeeId: val(row, 'Employee ID'),
         nodeId: posId,
-        employeeName: row[2],
+        employeeName: val(row, 'Employee Name'),
         managerId: managerPositionId || '',
         managerEmployeeId: managerEmployeeId || '',
-        managerName: row[4],
-        jobTitle: row[5],
-        division: employeeDivision,
-        group: row[7],
-        department: employeeDepartment,
-        section: row[9],
-        gender: row[10] ? row[10].toString().trim() : '',
-        level: row[11],
-        payrollType: isFieldAuthorized('Payroll Type') ? row[12] : null,
-        jobLevel: isFieldAuthorized('Job Level') ? row[13] : null,
-        contractType: isFieldAuthorized('Contract Type') ? (row[14] ? row[14].toString().trim() : null) : null,
-        stylingContractType: row[14] ? row[14].toString().trim() : null,
-        competency: isFieldAuthorized('Competency') ? row[15] : null,
+        managerName: val(row, 'Reporting to'),
+        jobTitle: val(row, 'Job Title'),
+        division: div,
+        group: grp,
+        department: dept,
+        section: sect,
+        gender: val(row, 'Gender'),
+        level: val(row, 'Level'),
+        payrollType: isFieldAuthorized('Payroll Type') ? val(row, 'Payroll Type') : null,
+        jobLevel: isFieldAuthorized('Job Level') ? val(row, 'Job Level') : null,
+        contractType: isFieldAuthorized('Contract Type') ? val(row, 'Contract Type') : null,
+        stylingContractType: val(row, 'Contract Type'),
+        competency: isFieldAuthorized('Competency') ? val(row, 'Competency') : null,
         status: employeeStatus,
-        positionStatus: row[17] ? row[17].toString().trim() : 'Active',
+        positionStatus: val(row, 'Position Status') || 'Active',
         dateHired: dateHired,
         dateOfBirth: dateOfBirth,
         contractEndDate: contractEndDate,
         historicalNote: history,
-        resignationDate: resignationDate
+        resignationDate: resignationDate,
+        // --- NEW: EVALUATION DATES ---
+        thirdMonthEval: val(row, '3rd Month Eval Date') instanceof Date ? Utilities.formatDate(val(row, '3rd Month Eval Date'), Session.getScriptTimeZone(), 'yyyy-MM-dd') : null,
+        fifthMonthEval: val(row, '5th Month Eval Date') instanceof Date ? Utilities.formatDate(val(row, '5th Month Eval Date'), Session.getScriptTimeZone(), 'yyyy-MM-dd') : null
       });
     });
 
+    // --- RECURSIVE GHOST NODE GENERATION ---
+    const visibleIds = new Set(employeesToShow.map(e => e.positionId));
+    const ghostNodes = new Map();
+    let nodesToCheck = [...employeesToShow]; 
 
+    while (nodesToCheck.length > 0) {
+        const nextBatch = [];
+        nodesToCheck.forEach(node => {
+            if (node.managerId && node.managerId !== '') {
+                if (!visibleIds.has(node.managerId) && !ghostNodes.has(node.managerId)) {
+                    const mgrRow = allEmployeesMap.get(node.managerId);
+                    if (mgrRow) {
+                        const rawManagerEmpId = val(mgrRow, 'Reporting to ID');
+                        let grandManagerPosId = '';
+                        if (rawManagerEmpId) {
+                             if (rawManagerEmpId.includes('-')) grandManagerPosId = rawManagerEmpId;
+                             else grandManagerPosId = employeeIdToPositionIdMap.get(rawManagerEmpId) || '';
+                        }
+
+                        const newGhost = {
+                            positionId: node.managerId,
+                            nodeId: node.managerId,
+                            employeeName: val(mgrRow, 'Employee Name') || 'External Manager',
+                            jobTitle: val(mgrRow, 'Job Title') || 'Manager',
+                            employeeId: val(mgrRow, 'Employee ID'),
+                            level: val(mgrRow, 'Level'),
+                            gender: val(mgrRow, 'Gender'),
+                            division: val(mgrRow, 'Division'),
+                            department: val(mgrRow, 'Department'),
+                            managerId: grandManagerPosId, 
+                            isGhost: true,
+                            positionStatus: 'Active',
+                            status: val(mgrRow, 'Status') || 'Active'
+                        };
+                        if (newGhost.managerId === newGhost.positionId) {
+                            newGhost.managerId = '';
+                        }
+
+                        ghostNodes.set(node.managerId, newGhost);
+                        nextBatch.push(newGhost); 
+                    }
+                }
+            }
+        });
+        nodesToCheck = nextBatch;
+    }
+
+    const finalAllIds = new Set([...visibleIds, ...ghostNodes.keys()]);
+    ghostNodes.forEach(ghost => {
+        if (ghost.managerId && !finalAllIds.has(ghost.managerId)) {
+             ghost.managerId = ''; 
+        }
+    });
+    ghostNodes.forEach(node => {
+        employeesToShow.push(node);
+    });
+    // --------------------------------------------------
+
+    // 7. Previous Headcount Logic
     let previousHeadcount = {};
     let totalApprovedPlantilla = 0;
     let previousDateString = null;
-
 
     try {
       const previousSheet = spreadsheet.getSheetByName('Previous Headcount');
@@ -964,89 +1499,77 @@ function getEmployeeData() {
         if (prevData.length > 0) {
           const prevHeaders = prevData.shift();
           const plantillaIndex = prevHeaders.indexOf('Approved Plantilla');
+          
           let lastFilledIndex = -1;
           for (let i = prevHeaders.length - 1; i >= 0; i--) {
-            if (String(prevHeaders[i]).includes('Filled')) {
+            if (String(prevHeaders[i]).toLowerCase().includes(' filled')) {
               lastFilledIndex = i;
+              const headerText = String(prevHeaders[i]);
+              previousDateString = headerText.substring(0, headerText.toLowerCase().indexOf(' filled')).trim();
               break;
             }
           }
+
           if (lastFilledIndex !== -1) {
             const lastVacantIndex = lastFilledIndex + 1;
-            const dateHeader = String(prevHeaders[lastFilledIndex] || '');
-            if (dateHeader) {
-              previousDateString = dateHeader.replace(/ filled/i, '').trim();
-            }
             prevData.forEach(function (row) {
-              const division = row[0],
-                group = row[1] || '',
-                department = row[2] || '',
-                section = row[3] || '';
+              const division = row[0], group = row[1] || '', department = row[2] || '', section = row[3] || '';
+              
+              if (!isDepartmentViewable(division, group, department, section)) return;
+
               const rawPlantilla = row[plantillaIndex];
               const plantillaValue = (plantillaIndex !== -1 && rawPlantilla !== '' && !isNaN(rawPlantilla)) ? parseInt(rawPlantilla) : null;
               const filled = row[lastFilledIndex] || 0;
               const vacant = (row.length > lastVacantIndex) ? (row[lastVacantIndex] || 0) : 0;
+              
               if (division) {
-                if (!previousHeadcount[division]) {
-                  previousHeadcount[division] = {
-                    filled: 0,
-                    vacant: 0,
-                    plantilla: null,
-                    groups: {}
-                  };
-                }
-                if (!previousHeadcount[division].groups[group]) {
-                  previousHeadcount[division].groups[group] = {
-                    filled: 0,
-                    vacant: 0,
-                    plantilla: null,
-                    departments: {}
-                  };
-                }
-                if (!previousHeadcount[division].groups[group].departments[department]) {
-                  previousHeadcount[division].groups[group].departments[department] = {
-                    filled: 0,
-                    vacant: 0,
-                    plantilla: null,
-                    sections: {}
-                  };
-                }
-                if (!previousHeadcount[division].groups[group].departments[department].sections[section]) {
-                  previousHeadcount[division].groups[group].departments[department].sections[section] = {
-                    filled: 0,
-                    vacant: 0,
-                    plantilla: null
-                  };
-                }
-                if (group === '' && department === '' && section === '') {
-                  previousHeadcount[division].filled = filled;
-                  previousHeadcount[division].vacant = vacant;
-                  previousHeadcount[division].plantilla = plantillaValue;
-                } else if (group && department === '' && section === '') {
-                  previousHeadcount[division].groups[group].filled = filled;
-                  previousHeadcount[division].groups[group].vacant = vacant;
-                  previousHeadcount[division].groups[group].plantilla = plantillaValue;
-                } else if (department && section === '') {
-                  previousHeadcount[division].groups[group].departments[department].filled = filled;
-                  previousHeadcount[division].groups[group].departments[department].vacant = vacant;
-                  previousHeadcount[division].groups[group].departments[department].plantilla = plantillaValue;
-                } else if (section) {
-                  previousHeadcount[division].groups[group].departments[department].sections[section].filled = filled;
-                  previousHeadcount[division].groups[group].departments[department].sections[section].vacant = vacant;
-                  previousHeadcount[division].groups[group].departments[department].sections[section].plantilla = plantillaValue;
-                }
-                if (group === '' && department === '' && section === '' && plantillaValue !== null) {
-                  totalApprovedPlantilla += plantillaValue;
-                }
+                 if (!previousHeadcount[division]) previousHeadcount[division] = { filled: 0, vacant: 0, plantilla: null, groups: {} };
+                 if (!previousHeadcount[division].groups[group]) previousHeadcount[division].groups[group] = { filled: 0, vacant: 0, plantilla: null, departments: {} };
+                 if (!previousHeadcount[division].groups[group].departments[department]) previousHeadcount[division].groups[group].departments[department] = { filled: 0, vacant: 0, plantilla: null, sections: {} };
+                 if (!previousHeadcount[division].groups[group].departments[department].sections[section]) previousHeadcount[division].groups[group].departments[department].sections[section] = { filled: 0, vacant: 0, plantilla: null };
+
+                 const target = (section) ? previousHeadcount[division].groups[group].departments[department].sections[section] :
+                                (department) ? previousHeadcount[division].groups[group].departments[department] :
+                                (group) ? previousHeadcount[division].groups[group] : previousHeadcount[division];
+                 
+                 target.filled = filled;
+                 target.vacant = vacant;
+                 target.plantilla = plantillaValue;
+
+                 let isRootForUser = false;
+                 if (!group && !department && !section) {
+                     isRootForUser = true;
+                 } 
+                 else if (group && !department && !section) {
+                     if (!isDepartmentViewable(division, '', '', '')) {
+                         isRootForUser = true;
+                     }
+                 }
+                 else if (department && !section) {
+                     if (!isDepartmentViewable(division, group, '', '') && 
+                         !isDepartmentViewable(division, '', '', '')) {
+                         isRootForUser = true;
+                     }
+                 }
+                 else if (section) {
+                     if (!isDepartmentViewable(division, group, department, '') &&
+                         !isDepartmentViewable(division, group, '', '') && 
+                         !isDepartmentViewable(division, '', '', '')) {
+                         isRootForUser = true;
+                     }
+                 }
+
+                 if (isRootForUser && plantillaValue !== null) {
+                    totalApprovedPlantilla += plantillaValue;
+                 }
               }
             });
           }
         }
       }
     } catch (e) {
-      Logger.log('WARNING: Could not parse "Previous Headcount" sheet. Summary data will be unavailable. Error: ' + e.message);
+      Logger.log('Warning: Previous Headcount logic failed: ' + e.message);
     }
-
 
     const snapshotTimestamp = PropertiesService.getScriptProperties().getProperty('snapshotTimestamp');
 
@@ -1054,21 +1577,20 @@ function getEmployeeData() {
       current: employeesToShow.filter(emp => emp.positionId),
       previous: previousHeadcount,
       snapshotTimestamp: snapshotTimestamp,
-      previousDateString: previousDateString,
+      previousDateString: previousDateString, 
       currentUserEmail: userEmail,
       userCanSeeAnyDepartment: hasReturnedAnyEmployee,
       totalApprovedPlantilla: totalApprovedPlantilla,
       canEdit: canEdit,
       canApprove: canApprove,
-      dropdownListData: dropdownListData
+      dropdownListData: dropdownListData,
+      canViewCompetency: permissions.hasModuleAccess
     };
   } catch (e) {
     Logger.log('ERROR in getEmployeeData: ' + e.toString() + ' Stack: ' + e.stack);
     return null;
   }
 }
-
-
 
 function getHistoricalNotes() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -1274,6 +1796,10 @@ function generateNewPositionId(division, section) {
 
 
 function saveEmployeeData(dataObject, mode) {
+    logToSheet(`--- saveEmployeeData Started ---`);
+    logToSheet(`Mode: ${mode}`);
+    logToSheet(`Received dataObject: ${JSON.stringify(dataObject)}`);
+
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
     const scriptProperties = PropertiesService.getScriptProperties();
@@ -1282,12 +1808,14 @@ function saveEmployeeData(dataObject, mode) {
 
         const ss = SpreadsheetApp.getActiveSpreadsheet();
         const mainSheet = ss.getSheets()[0];
+        logToSheet(`Target sheet: "${mainSheet.getName()}"`);
         const headers = mainSheet.getRange(1, 1, 1, mainSheet.getLastColumn()).getValues()[0];
         const keyMap = {};
         headers.forEach((header, i) => {
             const key = header.toLowerCase().replace(/\s+/g, '').replace(/[^a-z0-9]/gi, '');
             keyMap[key] = i;
         });
+        logToSheet(`Header key map generated: ${JSON.stringify(keyMap)}`);
 
         // Convert all incoming string data to uppercase for consistency, except for specific fields
         for (const key in dataObject) {
@@ -1313,11 +1841,11 @@ function saveEmployeeData(dataObject, mode) {
             const empIdIndex = headers.indexOf('Employee ID');
             for (let i = 1; i < allData.length; i++) {
                 const row = allData[i];
-                if ((String(row[empIdIndex]) || '').toUpperCase() === dataObject.employeeid.toUpperCase() && (String(row[posIdIndex]) || '').toUpperCase() !== dataObject.positionid.toUpperCase()) {
+                if ((String(row[empIdIndex]) || '').toUpperCase() === String(dataObject.employeeid).toUpperCase() && (String(row[posIdIndex]) || '').toUpperCase() !== dataObject.positionid.toUpperCase()) {
                     const oldRowIndex = i + 1;
                     isTransfer = true;
                     oldPositionIdForTransfer = row[posIdIndex];
-                    transferredEmployeeId = dataObject.employeeid.toUpperCase();
+                    transferredEmployeeId = String(dataObject.employeeid).toUpperCase();
                     if (dataObject.startdateinposition) {
                         scriptProperties.setProperties({
                             'pendingResignationPosId': oldPositionIdForTransfer.toUpperCase(),
@@ -1373,18 +1901,26 @@ function saveEmployeeData(dataObject, mode) {
             }
         } else if (mode === 'edit') {
             const positionId = dataObject.positionid;
-            const positionIdColValues = mainSheet.getRange("A2:A").getValues();
+            logToSheet(`EDIT mode: Searching for Position ID "${positionId}" in column A.`);
+            const positionIdColValues = mainSheet.getRange("A2:A" + mainSheet.getLastRow()).getValues();
             const rowIndex = positionIdColValues.findIndex(r => r[0] == positionId) + 2;
-            if (rowIndex === 1) throw new Error(`Position ID ${positionId} not found for editing.`);
+
+            if (rowIndex < 2) { // rowIndex will be 1 if not found, since we add 2
+              logToSheet(`ERROR: Position ID "${positionId}" not found in column A. Aborting save.`);
+              throw new Error(`Position ID ${positionId} not found for editing.`);
+            }
+            logToSheet(`Position ID found at row index: ${rowIndex}.`);
 
             const rangeToUpdate = mainSheet.getRange(rowIndex, 1, 1, headers.length);
+            logToSheet(`Range to update is: ${rangeToUpdate.getA1Notation()}`);
             const existingRowData = rangeToUpdate.getValues()[0];
+            logToSheet(`Existing data in row: ${JSON.stringify(existingRowData)}`);
             const originalStatus = existingRowData[keyMap['status']];
             const originalEmployeeId = existingRowData[keyMap['employeeid']];
 
             if (dataObject.status.toUpperCase() === 'VACANT' && originalEmployeeId) {
                 isManualVacate = true;
-                vacatingEmployeeId = originalEmployeeId.toUpperCase();
+                vacatingEmployeeId = String(originalEmployeeId).toUpperCase();
                 vacatedPositionId = positionId;
             }
 
@@ -1413,7 +1949,9 @@ function saveEmployeeData(dataObject, mode) {
                     existingRowData[keyMap[key]] = dataObject[key];
                 }
             }
+            logToSheet(`Data to be written to sheet: ${JSON.stringify(existingRowData)}`);
             rangeToUpdate.setValues([existingRowData]);
+            logToSheet(`setValues() called successfully on range ${rangeToUpdate.getA1Notation()}.`);
 
             if (dataObject.status === 'RESIGNED') {
                 let resignationSheet = ss.getSheetByName('Resignation Data');
@@ -1481,7 +2019,7 @@ function saveEmployeeData(dataObject, mode) {
 
         return "Data saved successfully.";
     } catch (e) {
-        Logger.log('Error in saveEmployeeData: ' + e.message + ' Stack: ' + e.stack);
+        logToSheet('Error in saveEmployeeData: ' + e.message + ' Stack: ' + e.stack);
         throw new Error('Failed to save data. ' + e.message);
     } finally {
         scriptProperties.deleteProperty('scriptChangeLock');
@@ -1509,7 +2047,7 @@ function deactivatePosition(positionId) {
 
     return "Position deactivated successfully.";
   } catch (e) {
-    Logger.log('Error in deactivatePosition: ' + e.message + ' Stack: ' + e.stack);
+    logToSheet('Error in deactivatePosition: ' + e.message + ' Stack: ' + e.stack);
     throw new Error('Failed to deactivate position. ' + e.message);
   } finally {
     lock.releaseLock();
@@ -1539,8 +2077,20 @@ function generateIncumbencyReport() {
   const ui = SpreadsheetApp.getUi();
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   const mainSheet = spreadsheet.getSheets()[0];
-  const mainData = mainSheet.getLastRow() > 1 ? mainSheet.getRange(2, 1, mainSheet.getLastRow() - 1, 3).getValues() : [];
-  const mainDataMap = new Map(mainData.map(row => [row[0], row]));
+  const mainData = mainSheet.getLastRow() > 1 ? mainSheet.getRange(2, 1, mainSheet.getLastRow() - 1, mainSheet.getLastColumn()).getValues() : [];
+  const mainDataMap = new Map();
+  const mainHeader = mainSheet.getRange(1,1,1,mainSheet.getLastColumn()).getValues()[0];
+  const posIdHeaderIndex = mainHeader.indexOf('Position ID');
+  const empIdHeaderIndex = mainHeader.indexOf('Employee ID');
+  const empNameHeaderIndex = mainHeader.indexOf('Employee Name');
+
+  mainData.forEach(row => {
+    mainDataMap.set(row[posIdHeaderIndex], {
+        employeeId: (row[empIdHeaderIndex] || '').toString().trim(),
+        employeeName: (row[empNameHeaderIndex] || '').toString().trim()
+    });
+  });
+
 
   const logSheet = spreadsheet.getSheetByName('change_log_sheet');
   const reportSheetName = 'Incumbency History';
@@ -1557,48 +2107,20 @@ function generateIncumbencyReport() {
   const finalHistoryRecords = [];
   const sortedPosIds = Object.keys(allHistory).sort();
 
-  const allLogDataNoHeaders = logSheet.getRange(2, 1, logSheet.getLastRow() - 1, logSheet.getLastColumn()).getValues();
-
   for (const posId of sortedPosIds) {
     const records = allHistory[posId];
     if (!records || records.length === 0) continue;
 
-    const lastRecord = records[records.length - 1];
-    const currentLiveRow = mainDataMap.get(posId);
-    const currentLiveEmployeeId = currentLiveRow ? (currentLiveRow[1] || '').toString().trim() : null;
-    const isCurrentlyVacant = !currentLiveEmployeeId;
-
-    // Correction 1: If the last incumbent is the current employee, ensure end date is 'Present'.
-    if (lastRecord.incumbentId && currentLiveEmployeeId && lastRecord.incumbentId === currentLiveEmployeeId && lastRecord.endDate) {
-      lastRecord.endDate = null;
-    }
-
-    // Correction 2 (Failsafe): If history says 'Present' but the position is vacant, find the true end date.
-    if (lastRecord.endDate === null && isCurrentlyVacant) {
-      const posIdIndex = headers.indexOf('Position ID');
-      const effectiveDateIndex = headers.indexOf('Effective Date');
-      const timestampIndex = headers.indexOf('Change Timestamp');
-
-      const allEventsForPos = allLogDataNoHeaders
-        .filter(row => row[posIdIndex] === posId)
-        .map(row => ({ date: _parseDate(row[effectiveDateIndex]) || _parseDate(row[timestampIndex]) }))
-        .filter(event => event.date)
-        .sort((a, b) => b.date.getTime() - a.date.getTime());
-
-      if (allEventsForPos.length > 0) {
-        lastRecord.endDate = allEventsForPos[0].date;
-      }
-    }
-
     records.forEach(rec => {
-      const tenure = (rec.startDate && (rec.endDate || new Date())) ? Math.round(((rec.endDate || new Date()) - rec.startDate) / (1000 * 60 * 60 * 24)) : 0;
+      const tenure = (rec.startDate && rec.endDate) ? Math.round((rec.endDate - rec.startDate) / (1000 * 60 * 60 * 24)) : 'N/A';
       finalHistoryRecords.push([
         posId,
         rec.jobTitle,
         rec.incumbentName,
         rec.startDate,
         rec.endDate,
-        tenure >= 0 ? tenure : 0,
+        tenure,
+        rec.overallHireDate,
         rec.changeCount
       ]);
     });
@@ -1613,7 +2135,7 @@ function generateIncumbencyReport() {
     reportSheet = spreadsheet.insertSheet(reportSheetName);
   }
   reportSheet.clear();
-  const reportHeaders = ['Position ID', 'Job Title', 'Incumbent Name', 'Start Date', 'End Date', 'Tenure (Days)', 'Position Change Count'];
+  const reportHeaders = ['Position ID', 'Job Title', 'Incumbent Name', 'Start Date in Position', 'End Date in Position', 'Tenure (Days)', 'Overall Hire Date', 'Position Change Count'];
   reportSheet.getRange(1, 1, 1, reportHeaders.length).setValues([reportHeaders]).setFontWeight('bold');
 
   if (finalHistoryRecords.length > 0) {
@@ -1621,21 +2143,13 @@ function generateIncumbencyReport() {
   }
 
   reportSheet.getRange("D:E").setNumberFormat("yyyy-mm-dd");
+  reportSheet.getRange("G:G").setNumberFormat("yyyy-mm-dd");
   reportSheet.setFrozenRows(1);
   reportSheet.autoResizeColumns(1, reportHeaders.length);
   ui.alert(`Success! "${reportSheetName}" sheet has been updated.`);
 }
 
-/**
- * =================================================================================================
- * FINAL REWRITE v9 - calculateIncumbencyEngine
- * =================================================================================================
- * This version correctly identifies the end of a tenure by recognizing "effective-dated" events
- * (like promotions/resignations) as definitive termination points. It also correctly handles
- * subsequent "ghost" log entries that might occur for an employee after their tenure has
- * officially ended, preventing these from creating incorrect history records.
- * =================================================================================================
- */
+
 function calculateIncumbencyEngine(allLogData, headers, mainDataMap) {
   const posIdIndex = headers.indexOf('Position ID');
   const empIdIndex = headers.indexOf('Employee ID');
@@ -1644,8 +2158,10 @@ function calculateIncumbencyEngine(allLogData, headers, mainDataMap) {
   const timestampIndex = headers.indexOf('Change Timestamp');
   const effectiveDateIndex = headers.indexOf('Effective Date');
   const hireDateIndex = headers.indexOf('Date Hired');
+  const statusIndex = headers.indexOf('Status');
 
   const isFirstEverEventForEmployee = (employeeId, eventDate, allLogs) => {
+    if (!employeeId) return false;
     for (const row of allLogs) {
       const logEmpId = (row[empIdIndex] || '').toString().trim();
       if (logEmpId === employeeId) {
@@ -1678,8 +2194,9 @@ function calculateIncumbencyEngine(allLogData, headers, mainDataMap) {
         incumbentId: (row[empIdIndex] || '').toString().trim() || null,
         incumbentName: (row[nameIndex] || '').toString().trim() || 'N/A',
         jobTitle: (row[jobTitleIndex] || '').toString().trim() || 'N/A',
-        hireDate: _parseDate(row[hireDateIndex]),
-        isEffective: !!_parseDate(row[effectiveDateIndex])
+        overallHireDate: _parseDate(row[hireDateIndex]),
+        isEffective: !!_parseDate(row[effectiveDateIndex]),
+        status: (row[statusIndex] || '').toString().trim().toUpperCase()
       }))
       .filter(e => e.eventDate)
       .sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
@@ -1694,79 +2211,65 @@ function calculateIncumbencyEngine(allLogData, headers, mainDataMap) {
         i++;
         continue;
       }
-
+      
       let startDate = startEvent.eventDate;
-      if (startEvent.hireDate && startEvent.hireDate.getTime() < startEvent.eventDate.getTime()) {
-        if (isFirstEverEventForEmployee(startEvent.incumbentId, startEvent.eventDate, allLogData)) {
-          startDate = startEvent.hireDate;
-        }
+      const isInternalMovement = ['PROMOTION', 'INTERNAL TRANSFER', 'LATERAL TRANSFER'].includes(startEvent.status);
+      const isFirstEvent = isFirstEverEventForEmployee(startEvent.incumbentId, startEvent.eventDate, allLogData);
+
+      if (!isInternalMovement && startEvent.overallHireDate && startEvent.overallHireDate.getTime() < startEvent.eventDate.getTime()) {
+        startDate = startEvent.overallHireDate;
       }
 
       let endDate = null;
-      let tenureEndingEvent = null;
       let nextEventIndex = i + 1;
 
-      for (let j = i; j < allChangeEventsForPos.length; j++) {
-        const currentEvent = allChangeEventsForPos[j];
-
-        if (currentEvent.incumbentId !== startEvent.incumbentId) {
-          endDate = currentEvent.eventDate;
-          tenureEndingEvent = currentEvent;
-          nextEventIndex = j;
-          break;
-        }
-
-        if (currentEvent.isEffective && currentEvent.incumbentId === startEvent.incumbentId) {
-          endDate = currentEvent.eventDate;
-          tenureEndingEvent = currentEvent;
-          let k = j + 1;
-          while (k < allChangeEventsForPos.length && allChangeEventsForPos[k].incumbentId === startEvent.incumbentId) {
-            k++;
-          }
-          nextEventIndex = k;
-          break;
-        }
+      // Find the last event that belongs to the current incumbent's tenure.
+      let lastEventIndexInTenure = i;
+      while (nextEventIndex < allChangeEventsForPos.length && allChangeEventsForPos[nextEventIndex].incumbentId === startEvent.incumbentId) {
+        lastEventIndexInTenure = nextEventIndex;
+        nextEventIndex++;
       }
+      
+      // The end date is the date of the last event in this tenure.
+      endDate = allChangeEventsForPos[lastEventIndexInTenure].eventDate;
 
-      if (!tenureEndingEvent) {
-        nextEventIndex = allChangeEventsForPos.length;
+      // If the employee is still the current incumbent in the live data, override the end date.
+      const liveRecord = mainDataMap.get(posId);
+      if (liveRecord && liveRecord.employeeId === startEvent.incumbentId) {
+        endDate = null; // A null endDate means 'Present'.
       }
-
-      const lastEventOfThisTenure = allChangeEventsForPos[nextEventIndex - 1];
+      
+      const lastKnownEventForIncumbent = allChangeEventsForPos.slice().reverse().find(e => e.incumbentId === startEvent.incumbentId) || startEvent;
 
       historyRecords.push({
         startDate: startDate,
         endDate: endDate,
         incumbentId: startEvent.incumbentId,
-        incumbentName: lastEventOfThisTenure.incumbentName,
-        jobTitle: lastEventOfThisTenure.jobTitle,
-        hireDate: startEvent.hireDate
+        incumbentName: lastKnownEventForIncumbent.incumbentName,
+        jobTitle: lastKnownEventForIncumbent.jobTitle,
+        overallHireDate: startEvent.overallHireDate
       });
-
+      
       i = nextEventIndex;
     }
 
-    const changeCount = historyRecords.length;
+    const changeCount = new Set(historyRecords.map(r => r.incumbentId)).size;
     historyRecords.forEach(rec => rec.changeCount = changeCount);
+
     finalHistory[posId] = historyRecords;
   }
   return finalHistory;
 }
 
-/**
- * REVISED - Fetches and formats incumbency history for the web app.
- */
+
 function getDetailedIncumbencyHistory(posId) {
   const cache = CacheService.getScriptCache();
   const cacheKey = `incumbency_history_${posId}`;
   const cachedHistory = cache.get(cacheKey);
 
   if (cachedHistory) {
-    Logger.log(`Cache HIT for Position ID: ${posId}`);
     return JSON.parse(cachedHistory);
   }
-
-  Logger.log(`Cache MISS for Position ID: ${posId}. Calculating from scratch.`);
 
   try {
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -1774,58 +2277,32 @@ function getDetailedIncumbencyHistory(posId) {
     const logSheet = spreadsheet.getSheetByName('change_log_sheet');
     if (!logSheet || !mainSheet || logSheet.getLastRow() < 2) return [];
 
-    const mainData = mainSheet.getLastRow() > 1 ? mainSheet.getRange(2, 1, mainSheet.getLastRow() - 1, 3).getValues() : [];
-    const mainDataMap = new Map(mainData.map(row => [row[0], row]));
+    const mainData = mainSheet.getLastRow() > 1 ? mainSheet.getRange(2, 1, mainSheet.getLastRow() - 1, mainSheet.getLastColumn()).getValues() : [];
+    const mainHeader = mainSheet.getRange(1,1,1,mainSheet.getLastColumn()).getValues()[0];
+    const posIdHeaderIndex = mainHeader.indexOf('Position ID');
+    const empIdHeaderIndex = mainHeader.indexOf('Employee ID');
+
+    const mainDataMap = new Map(mainData.map(row => [row[posIdHeaderIndex], {employeeId: (row[empIdHeaderIndex] || '').toString().trim()}]));
 
     const allLogDataWithHeaders = logSheet.getDataRange().getValues();
     const headers = allLogDataWithHeaders.shift();
     const allLogData = allLogDataWithHeaders;
 
-    // Run the main history engine
     const allHistory = calculateIncumbencyEngine(allLogData, headers, mainDataMap);
     let positionHistory = allHistory[posId] || [];
-
-    // --- START: DATA CORRECTION AND FAILSAFE LOGIC ---
-    if (positionHistory.length > 0) {
-      const lastRecord = positionHistory[positionHistory.length - 1];
-      const liveRow = mainDataMap.get(posId);
-      const currentLiveEmployeeId = liveRow ? (liveRow[1] || '').toString().trim() : null;
-      const isCurrentlyVacant = !currentLiveEmployeeId;
-
-      // Correction 1: If the last incumbent in the history is the current, active employee,
-      // ensure their end date is null (i.e., 'Present'), overriding any erroneous log entry.
-      if (lastRecord.incumbentId && currentLiveEmployeeId && lastRecord.incumbentId === currentLiveEmployeeId && lastRecord.endDate) {
-        Logger.log(`Position ${posId} is currently held by ${currentLiveEmployeeId}, but history shows an end date. Correcting to 'Present'.`);
-        lastRecord.endDate = null;
-      }
-
-      // Correction 2 (Failsafe): If the position is actually vacant, but the history shows 'Present',
-      // find the last known event for that position and use its date as the end date.
-      if (lastRecord.endDate === null && isCurrentlyVacant) {
-        Logger.log(`Position ${posId} is vacant but history shows "Present". Applying final failsafe.`);
-        const posIdIndex = headers.indexOf('Position ID');
-        const effectiveDateIndex = headers.indexOf('Effective Date');
-        const timestampIndex = headers.indexOf('Change Timestamp');
-        
-        const allEventsForPos = allLogData
-          .filter(row => row[posIdIndex] === posId)
-          .map(row => ({ date: _parseDate(row[effectiveDateIndex]) || _parseDate(row[timestampIndex]) }))
-          .filter(event => event.date)
-          .sort((a, b) => b.date.getTime() - a.date.getTime());
-
-        if (allEventsForPos.length > 0) {
-          lastRecord.endDate = allEventsForPos[0].date;
-          Logger.log(`Failsafe applied. Corrected End Date to: ${lastRecord.endDate}`);
-        }
-      }
-    }
-    // --- END OF DATA CORRECTION AND FAILSAFE LOGIC ---
 
     const finalHistory = positionHistory
       .filter(rec => rec.incumbentId)
       .map(rec => {
         const startDate = rec.startDate;
-        const endDateForCalc = rec.endDate || new Date();
+        let endDate = rec.endDate;
+        const liveRecord = mainDataMap.get(posId);
+
+        if (liveRecord && liveRecord.employeeId === rec.incumbentId) {
+            endDate = null;
+        }
+        
+        const endDateForCalc = endDate || new Date();
 
         let tenureDays = 0;
         if (startDate && endDateForCalc) {
@@ -1845,13 +2322,13 @@ function getDetailedIncumbencyHistory(posId) {
           if (days > 0 || (years === 0 && months === 0)) parts.push(`${days} day${days !== 1 ? 's' : ''}`);
           tenureString = parts.join(', ');
         }
-
+        
         return {
           name: rec.incumbentName,
           startDate: rec.startDate ? Utilities.formatDate(rec.startDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 'N/A',
-          endDate: rec.endDate ? Utilities.formatDate(rec.endDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 'Present',
+          endDate: endDate ? Utilities.formatDate(endDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 'Present',
           tenure: tenureString,
-          employeeHireDate: rec.hireDate ? Utilities.formatDate(rec.hireDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 'N/A',
+          employeeHireDate: rec.overallHireDate ? Utilities.formatDate(rec.overallHireDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 'N/A',
         };
       });
 
@@ -1877,153 +2354,152 @@ function getUpcomingDues() {
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-
   const upcoming = [];
   const overdue = [];
 
   if (mainSheet.getLastRow() < 2) {
-    return {
-      upcoming,
-      overdue
-    };
+    return { upcoming, overdue };
   }
 
+  // --- 1. ACCESS CONTROL SETUP ---
+  const permissions = getSessionPermissions();
+  const isRowVisible = (div, grp, dept, sect) => {
+      if (permissions.allowedScopes.includes('ALL')) return true;
+      return permissions.allowedScopes.includes((div || '').toString().trim().toLowerCase()) ||
+             permissions.allowedScopes.includes((grp || '').toString().trim().toLowerCase()) ||
+             permissions.allowedScopes.includes((dept || '').toString().trim().toLowerCase()) ||
+             permissions.allowedScopes.includes((sect || '').toString().trim().toLowerCase());
+  };
+
+  // --- 2. DYNAMIC HEADER MAPPING ---
   const mainData = mainSheet.getDataRange().getValues();
-  const mainHeaders = mainData.shift();
-  const mainDataMap = new Map(mainData.map(row => [row[mainHeaders.indexOf('Position ID')], row]));
-  const nameIndex = mainHeaders.indexOf('Employee Name');
-  const contractTypeIndex = mainHeaders.indexOf('Contract Type');
-  const contractEndIndex = mainHeaders.indexOf('Contract End Date');
-  const statusIndex = mainHeaders.indexOf('Status');
-  const posStatusIndex = mainHeaders.indexOf('Position Status');
-  const dateHiredIndex = mainHeaders.indexOf('Date Hired');
+  const headers = mainData.shift();
+  
+  const h = new Map(headers.map((name, i) => [String(name).trim().toLowerCase().replace(/\s+/g, ''), i]));
+  const val = (row, headerName) => {
+      const idx = h.get(headerName.toLowerCase().replace(/\s+/g, ''));
+      return (idx !== undefined) ? row[idx] : null;
+  };
 
-  mainDataMap.forEach((row, posId) => {
-    const positionStatus = (row[posStatusIndex] || '').toString().trim().toUpperCase();
-    if (positionStatus === 'INACTIVE') return;
+  const mainDataMap = new Map();
+  mainData.forEach(row => {
+      const posId = val(row, 'Position ID');
+      if (posId) mainDataMap.set(posId, row);
 
-    const contractType = (row[contractTypeIndex] || '').toString().trim().toUpperCase();
-    const endDate = row[contractEndIndex];
-    if (contractType === 'JPRO' && endDate instanceof Date) {
-      const normalizedEndDate = new Date(endDate.getTime());
-      normalizedEndDate.setHours(0, 0, 0, 0);
-      const timeDiff = normalizedEndDate.getTime() - today.getTime();
-      const days = Math.round(timeDiff / (1000 * 60 * 60 * 24));
-      const employeeName = row[nameIndex];
+      const positionStatus = (val(row, 'Position Status') || '').toString().trim().toUpperCase();
+      if (positionStatus === 'INACTIVE') return;
 
-      if (days >= 0 && days <= 30) {
-        const message = `${employeeName}'s JPRO contract ends in ${days} day${days !== 1 ? 's' : ''}.`;
-        upcoming.push({
-          days,
-          message
-        });
-      } else if (days < 0) {
-        const daysAgo = Math.abs(days);
-        const message = `${employeeName}'s JPRO contract expired ${daysAgo} day${daysAgo !== 1 ? 's' : ''} ago. Please update their status.`;
-        overdue.push({
-          days: daysAgo,
-          message
-        });
+      const div = val(row, 'Division');
+      const grp = val(row, 'Group');
+      const dept = val(row, 'Department');
+      const sect = val(row, 'Section');
+      
+      if (!isRowVisible(div, grp, dept, sect)) return;
+
+      const employeeName = val(row, 'Employee Name');
+      const contractType = (val(row, 'Contract Type') || '').toString().trim().toUpperCase();
+      const contractEndDate = val(row, 'Contract End Date');
+      const status = (val(row, 'Status') || '').toString().trim().toUpperCase();
+      const dateHired = val(row, 'Date Hired');
+
+      // 1. JPRO Contract Expiry Logic
+      if (contractType === 'JPRO' && contractEndDate instanceof Date) {
+          const normalizedEndDate = new Date(contractEndDate.getTime());
+          normalizedEndDate.setHours(0, 0, 0, 0);
+          const timeDiff = normalizedEndDate.getTime() - today.getTime();
+          const days = Math.round(timeDiff / (1000 * 60 * 60 * 24));
+          if (days >= 0 && days <= 30) {
+              upcoming.push({ days, message: `${employeeName}'s JPRO contract ends in ${days} day${days !== 1 ? 's' : ''}.` });
+          } else if (days < 0) {
+              const daysAgo = Math.abs(days);
+              overdue.push({ days: daysAgo, message: `${employeeName}'s JPRO contract expired ${daysAgo} day${daysAgo !== 1 ? 's' : ''} ago. Please update their status.` });
+          }
       }
-    }
+
+      // 2. Probationary / New Hire Logic
+      if ((status === 'PROBATIONARY' || status === 'NEW HIRE') && dateHired instanceof Date) {
+          
+          // --- GET COMPLETED DATES ---
+          const eval3Done = val(row, '3rd Month Eval Date');
+          const eval5Done = val(row, '5th Month Eval Date');
+
+          // 3-Month Evaluation Logic
+          if (!eval3Done) {
+              const evaluationDate = new Date(dateHired.getTime());
+              evaluationDate.setMonth(evaluationDate.getMonth() + 3);
+              evaluationDate.setHours(0, 0, 0, 0);
+              const evalDays = Math.round((evaluationDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+              
+              if (evalDays >= 0 && evalDays <= 30) {
+                  upcoming.push({ days: evalDays, message: `${employeeName} is due for 3-month evaluation in ${evalDays} day${evalDays !== 1 ? 's' : ''}.` });
+              } else if (evalDays < 0 && evalDays >= -30) {
+                  const evalDaysAgo = Math.abs(evalDays);
+                  overdue.push({ days: evalDaysAgo, message: `${employeeName}'s 3-month evaluation was due ${evalDaysAgo} day${evalDaysAgo !== 1 ? 's' : ''} ago.` });
+              }
+          }
+
+          // 5th Month / Regularization Logic
+          if (!eval5Done) {
+              const regularizationDate = new Date(dateHired.getTime());
+              regularizationDate.setMonth(regularizationDate.getMonth() + 5); 
+              regularizationDate.setHours(0, 0, 0, 0);
+              const regDays = Math.round((regularizationDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+              
+              if (regDays >= 0 && regDays <= 30) {
+                  upcoming.push({ days: regDays, message: `${employeeName} is due for 5th-month evaluation in ${regDays} day${regDays !== 1 ? 's' : ''}.` });
+              } else if (regDays < 0) {
+                  const regDaysAgo = Math.abs(regDays);
+                  overdue.push({ days: regDaysAgo, message: `${employeeName}'s 5th-month evaluation was due ${regDaysAgo} day${regDaysAgo !== 1 ? 's' : ''} ago.` });
+              }
+          }
+      }
   });
 
-  if (statusIndex > -1 && dateHiredIndex > -1) {
-    mainData.forEach(row => {
-        const positionStatus = (row[posStatusIndex] || '').toString().trim().toUpperCase();
-        if (positionStatus === 'INACTIVE') return;
-
-        const status = (row[statusIndex] || '').toString().trim().toUpperCase();
-        const startDate = row[dateHiredIndex];
-
-        if ((status === 'PROBATIONARY' || status === 'NEW HIRE') && startDate instanceof Date) {
-            const employeeName = row[nameIndex];
-
-            // 3-Month Evaluation Logic
-            const evaluationDate = new Date(startDate.getTime());
-            evaluationDate.setMonth(evaluationDate.getMonth() + 3);
-            evaluationDate.setHours(0, 0, 0, 0);
-
-            const evalTimeDiff = evaluationDate.getTime() - today.getTime();
-            const evalDays = Math.round(evalTimeDiff / (1000 * 60 * 60 * 24));
-
-            // --- MODIFIED LOGIC HERE ---
-            // Only show notification from 30 days before to 30 days after the due date.
-            if (evalDays >= 0 && evalDays <= 30) {
-                const message = `${employeeName} is due for 3-month evaluation in ${evalDays} day${evalDays !== 1 ? 's' : ''}.`;
-                upcoming.push({ days: evalDays, message });
-            } else if (evalDays < 0 && evalDays >= -30) { // Condition changed
-                const evalDaysAgo = Math.abs(evalDays);
-                const message = `${employeeName}'s 3-month evaluation was due ${evalDaysAgo} day${evalDaysAgo !== 1 ? 's' : ''} ago.`;
-                overdue.push({ days: evalDaysAgo, message });
-            }
-
-            // 6-Month Regularization Logic (remains the same)
-            const regularizationDate = new Date(startDate.getTime());
-            regularizationDate.setMonth(regularizationDate.getMonth() + 6);
-            regularizationDate.setHours(0, 0, 0, 0);
-
-            const regTimeDiff = regularizationDate.getTime() - today.getTime();
-            const regDays = Math.round(regTimeDiff / (1000 * 60 * 60 * 24));
-            if (regDays >= 0 && regDays <= 30) {
-                const message = `${employeeName} is due for regularization in ${regDays} day${regDays !== 1 ? 's' : ''}.`;
-                upcoming.push({ days: regDays, message });
-            } else if (regDays < 0) {
-                const regDaysAgo = Math.abs(regDays);
-                const message = `${employeeName}'s regularization was due ${regDaysAgo} day${regDaysAgo !== 1 ? 's' : ''} ago. Please update their status.`;
-                overdue.push({ days: regDaysAgo, message });
-            }
-        }
-    });
-  }
-
+  // 3. Resignation Logic
   if (logSheet && logSheet.getLastRow() > 1) {
     const logData = logSheet.getDataRange().getValues();
     const logHeaders = logData.shift();
-    const logPosIdIndex = logHeaders.indexOf('Position ID');
-    const logNameIndex = logHeaders.indexOf('Employee Name');
-    const logStatusIndex = logHeaders.indexOf('Status');
-    const logEffectiveDateIndex = logHeaders.indexOf('Effective Date');
-    if (logPosIdIndex > -1 && logStatusIndex > -1 && logEffectiveDateIndex > -1) {
+    const lIdx = (name) => logHeaders.indexOf(name);
+    
+    const logPosIdIdx = lIdx('Position ID');
+    const logNameIndex = lIdx('Employee Name');
+    const logStatusIndex = lIdx('Status');
+    const logEffectiveDateIndex = lIdx('Effective Date');
+
+    if (logPosIdIdx > -1 && logStatusIndex > -1 && logEffectiveDateIndex > -1) {
       const latestResignations = new Map();
       for (let i = logData.length - 1; i >= 0; i--) {
         const row = logData[i];
-        const posId = row[logPosIdIndex];
+        const posId = row[logPosIdIdx];
         const logStatus = (row[logStatusIndex] || '').trim().toUpperCase();
         if (posId && logStatus === 'RESIGNED' && !latestResignations.has(posId)) {
-          latestResignations.set(posId, {
-            date: row[logEffectiveDateIndex],
-            name: row[logNameIndex]
-          });
+          latestResignations.set(posId, { date: row[logEffectiveDateIndex], name: row[logNameIndex] });
         }
       }
 
       latestResignations.forEach((resignation, posId) => {
-        const currentPosData = mainDataMap.get(posId);
-        if (!currentPosData || (currentPosData[statusIndex] || '').toUpperCase() !== 'RESIGNED') {
-          return;
-        }
+        const currentPosRow = mainDataMap.get(posId);
+        if (!currentPosRow) return;
+
+        const div = val(currentPosRow, 'Division');
+        const grp = val(currentPosRow, 'Group');
+        const dept = val(currentPosRow, 'Department');
+        const sect = val(currentPosRow, 'Section');
+        if (!isRowVisible(div, grp, dept, sect)) return;
+
+        const currentStatus = (val(currentPosRow, 'Status') || '').toString().trim().toUpperCase();
+        if (currentStatus !== 'RESIGNED') return;
 
         const effectiveDate = resignation.date;
         if (effectiveDate instanceof Date) {
           const normalizedEffectiveDate = new Date(effectiveDate.getTime());
           normalizedEffectiveDate.setHours(0, 0, 0, 0);
-          const timeDiff = normalizedEffectiveDate.getTime() - today.getTime();
-          const days = Math.round(timeDiff / (1000 * 60 * 60 * 24));
-
+          const days = Math.round((normalizedEffectiveDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
           if (days >= 0 && days <= 30) {
-            const message = `${resignation.name}'s resignation is effective in ${days} day${days !== 1 ? 's' : ''}.`;
-            upcoming.push({
-              days,
-              message
-            });
+            upcoming.push({ days, message: `${resignation.name}'s resignation is effective in ${days} day${days !== 1 ? 's' : ''}.` });
           } else if (days < 0) {
             const daysAgo = Math.abs(days);
-            const message = `${resignation.name}'s resignation was ${daysAgo} day${daysAgo !== 1 ? 's' : ''} ago. Please update the position to VACANT.`;
-            overdue.push({
-              days: daysAgo,
-              message
-            });
+            overdue.push({ days: daysAgo, message: `${resignation.name}'s resignation was ${daysAgo} day${daysAgo !== 1 ? 's' : ''} ago. Please update the position to VACANT.` });
           }
         }
       });
@@ -2032,10 +2508,8 @@ function getUpcomingDues() {
 
   const sortedUpcoming = upcoming.sort((a, b) => a.days - b.days).map(d => d.message);
   const sortedOverdue = overdue.sort((a, b) => a.days - b.days).map(d => d.message);
-  return {
-    upcoming: sortedUpcoming,
-    overdue: sortedOverdue
-  };
+  
+  return { upcoming: sortedUpcoming, overdue: sortedOverdue };
 }
 
 
@@ -2502,42 +2976,68 @@ function generateMasterlistSheetWithPrompt() {
   }
 }
 
+/**
+ * GETS LATEST JD (Supports Folders & Loose Files)
+ */
 function getJdFileUrl(positionId, employeeId, jobTitle, type) {
   try {
-    let folder;
-    let files;
+    const rootFolderId = (type === 'general') ? JD_GENERAL_FOLDER_ID : JD_INCUMBENT_FOLDER_ID;
+    const rootFolder = DriveApp.getFolderById(rootFolderId);
     
+    // 1. Prepare Names
+    const cleanPosId = (positionId || "NO-ID").toString().toUpperCase().trim();
+    const cleanTitle = (jobTitle || "JOB-TITLE").toString().toUpperCase().trim();
+    
+    let filePrefix;
+    let folderName;
+
     if (type === 'general') {
-      folder = DriveApp.getFolderById(JD_GENERAL_FOLDER_ID);
-      const searchPrefix = positionId;
-      files = folder.getFiles();
-      // Loop through all files in the folder to find a match
-      while (files.hasNext()) {
-        const file = files.next();
-        // If a file starts with the Position ID, we've found it
-        if (file.getName().startsWith(searchPrefix)) {
-          // Use the correct embedding URL format
-          return `https://drive.google.com/file/d/${file.getId()}/preview`;
-        }
-      }
-    } else if (type === 'incumbent') {
-      if (!employeeId) {
-        return null; // Still require an employeeId for this type
-      }
-      folder = DriveApp.getFolderById(JD_INCUMBENT_FOLDER_ID);
-      // The incumbent filename is more specific, so we can do a more targeted search
-      const fileName = `${positionId}-${jobTitle}-${employeeId}.pdf`;
-      files = folder.getFilesByName(fileName);
-      if (files.hasNext()) {
-        const file = files.next();
-        // Use the correct embedding URL format
-        return `https://drive.google.com/file/d/${file.getId()}/preview`;
-      }
+      // General: Search files by ID, Folder by "ID TITLE"
+      filePrefix = cleanPosId; 
+      folderName = `${cleanPosId} ${cleanTitle}`;
     } else {
-      throw new Error("Invalid job description type specified.");
+      // Incumbent: Search files and folder by full string
+      const cleanEmpId = (employeeId || "NO-EMP").toString().trim();
+      filePrefix = `${cleanPosId}-${cleanTitle}-${cleanEmpId}`;
+      folderName = filePrefix;
     }
 
-    return null; // Return null if no file was found after searching
+    // 2. Determine Search Folder
+    // Check if the specific sub-folder exists. If yes, search THERE. If no, search ROOT.
+    let searchFolder = rootFolder;
+    const subFolders = rootFolder.getFoldersByName(folderName);
+    
+    if (subFolders.hasNext()) {
+        searchFolder = subFolders.next();
+    }
+
+    // 3. Find Matches in the determined folder
+    const files = searchFolder.getFiles();
+    const matches = [];
+    const versionRegex = /Ver_(\d+)/i;
+
+    while (files.hasNext()) {
+      const file = files.next();
+      const name = file.getName();
+      
+      if (name.toUpperCase().startsWith(filePrefix)) {
+        const match = name.match(versionRegex);
+        // Default to 0 if no version number (Legacy support)
+        const version = match ? parseInt(match[1], 10) : 0;
+        
+        matches.push({
+          file: file,
+          version: version,
+          name: name
+        });
+      }
+    }
+
+    if (matches.length === 0) return null;
+
+    // 4. Sort Descending (Highest Version First) and Return
+    matches.sort((a, b) => b.version - a.version);
+    return `https://drive.google.com/file/d/${matches[0].file.getId()}/preview`;
 
   } catch (e) {
     Logger.log(`Error in getJdFileUrl: ${e.toString()}`);
@@ -2777,6 +3277,69 @@ function getDateOfBirth(employeeId) {
 
 // --- START: NEW PREDICTIVE INSIGHTS FUNCTION ---
 
+// --- PASTE NEW FUNCTION HERE ---
+/**
+ * Gets a list of documents for a given change request ID.
+ * @param {string} requestId The ID of the change request.
+ * @returns {Array<Object>|Object} An array of file objects {name, url} or an error object.
+ */
+function getRequestDocumentList(requestId) {
+  try {
+    if (!requestId) {
+      return { error: "Request ID is missing." };
+    }
+
+    const parentFolder = DriveApp.getFolderById(CHANGE_REQUESTS_FOLDER_ID);
+    const requestFolders = parentFolder.getFoldersByName(requestId);
+
+    if (!requestFolders.hasNext()) {
+      // If the folder doesn't exist, it might be an older request before folder creation was implemented.
+      // In that case, we can try to find a single file link in the sheet data.
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const sheet = ss.getSheetByName('Org Chart Requests');
+      if (sheet) {
+          const data = sheet.getDataRange().getValues();
+          const headers = data[0];
+          const idCol = headers.indexOf('RequestID');
+          const docCol = headers.indexOf('SupportingDocuments');
+          if (idCol > -1 && docCol > -1) {
+              for (let i = 1; i < data.length; i++) {
+                  if (data[i][idCol] === requestId) {
+                      const docUrl = data[i][docCol];
+                      if (docUrl && docUrl.startsWith('http')) {
+                          // This is likely a single file or a folder link. We can't list files,
+                          // but we can return it as a single item for the user to open.
+                          return [{ name: "Open Document Link", url: docUrl }];
+                      }
+                      break; // Found the request, stop searching.
+                  }
+              }
+          }
+      }
+      return []; // Return empty array if folder not found and no link in sheet.
+    }
+
+    const requestFolder = requestFolders.next();
+    const files = requestFolder.getFiles();
+    const fileList = [];
+
+    while (files.hasNext()) {
+      const file = files.next();
+      fileList.push({
+        name: file.getName(),
+        // Use the /preview URL for embedding in the iframe
+        url: `https://drive.google.com/file/d/${file.getId()}/preview`
+      });
+    }
+
+    return fileList;
+
+  } catch (e) {
+    Logger.log(`Error in getRequestDocumentList for ID ${requestId}: ${e.toString()}`);
+    return { error: `Server error while retrieving documents: ${e.message}` };
+  }
+}
+
 // --- START: REVISED PREDICTIVE INSIGHTS FUNCTION (v2) ---
 
 function getAttritionRiskData() {
@@ -2885,12 +3448,26 @@ function getAttritionRiskData() {
 }
 
 /**
- * Fetches the data required to build a team competency heatmap.
- * @param {string} department The department to filter by.
- * @returns {Object} An object containing employee scores and competency headers.
+ * REVISED: Generates Team Heatmap data with full filters (Division, Group, Dept, Section).
+ * @param {Object|string} filters - Filter object {division, group, department, section} OR string (legacy department name).
+ * @returns {Object} Heatmap data.
  */
-function getTeamCompetencyHeatmap(department) {
-  if (!department) return { error: 'Department not specified.' };
+function getTeamCompetencyHeatmap(filters) {
+  // 1. Security Check
+  const permissions = getSessionPermissions();
+  if (!permissions.hasModuleAccess) {
+    return { error: "Access Denied: You do not have permission to view Competency data." };
+  }
+
+  let activeFilters = {};
+  if (typeof filters === 'string') {
+      activeFilters = { department: filters };
+  } else {
+      activeFilters = filters || {};
+  }
+
+  const hasFilter = activeFilters.division || activeFilters.group || activeFilters.department || activeFilters.section;
+  if (!hasFilter) return { error: 'Please select at least one filter.' };
 
   try {
     const hubSs = SpreadsheetApp.getActiveSpreadsheet();
@@ -2898,84 +3475,115 @@ function getTeamCompetencyHeatmap(department) {
     const compSs = SpreadsheetApp.openById(COMPETENCY_SPREADSHEET_ID);
     const compSheet = compSs.getSheetByName('Competency Matrix');
 
-    if (!mainSheet || !compSheet) {
-      return { error: 'Required sheets not found.' };
-    }
+    if (!mainSheet || !compSheet) return { error: 'Required sheets not found.' };
 
-    // Get department data from main sheet
     const mainData = mainSheet.getDataRange().getValues();
     const mainHeaders = mainData.shift();
-    const mainEmpIdIndex = mainHeaders.indexOf('Employee ID');
-    const mainDeptIndex = mainHeaders.indexOf('Department');
-    const employeeToDeptMap = new Map();
-    mainData.forEach(row => {
-      if (row[mainEmpIdIndex] && row[mainDeptIndex]) {
-        employeeToDeptMap.set(String(row[mainEmpIdIndex]).trim(), row[mainDeptIndex]);
-      }
-    });
+    
+    // Dynamic Header Mapping for Main Sheet
+    const hMap = new Map(mainHeaders.map((h, i) => [String(h).trim().toLowerCase().replace(/\s+/g, ''), i]));
+    const idx = (name) => hMap.get(name.toLowerCase().replace(/\s+/g, ''));
 
-    // Get competency data
-    const compData = compSheet.getDataRange().getValues();
-    const rawCompHeaders = compData.shift();
-    const compHeaders = rawCompHeaders.map(h => (h || '').toString().replace(/\n|\r/g, ' ').trim());
-    const compEmpIdIndex = compHeaders.indexOf('EMPLOYEE ID');
-    const compNameIndex = compHeaders.indexOf('EMPLOYEE NAME');
+    const colEmpId = idx('employeeid');
+    const colDiv = idx('division');
+    const colGrp = idx('group');
+    const colDept = idx('department');
+    const colSect = idx('section');
 
-    // Filter employees by the selected department
-    const departmentEmployees = compData.filter(row => {
-      const empId = String(row[compEmpIdIndex]).trim();
-      return employeeToDeptMap.get(empId) === department;
-    });
-
-    if (departmentEmployees.length === 0) {
-      return { headers: [], employeeScores: [] }; // No employees in this department
+    const employeeLocationMap = new Map();
+    if (colEmpId !== undefined) {
+        mainData.forEach(row => {
+          const empId = String(row[colEmpId]).trim();
+          if (empId) {
+            employeeLocationMap.set(empId, {
+                division: row[colDiv] || '',
+                group: row[colGrp] || '',
+                department: row[colDept] || '',
+                section: row[colSect] || ''
+            });
+          }
+        });
     }
 
-    const competencyColumns = [];
-    const competencyHeaderNames = [];
+    const compData = compSheet.getDataRange().getValues();
+    const rawCompHeaders = compData.shift();
+    const compHeaders = rawCompHeaders.map(h => h.toString().replace(/\s+/g, ' ').trim().toUpperCase());
+    
+    const compEmpIdIndex = compHeaders.indexOf('EMPLOYEE ID');
+    const compNameIndex = compHeaders.indexOf('EMPLOYEE NAME');
+    if (compEmpIdIndex === -1) return { error: "Header 'EMPLOYEE ID' not found in Competency Matrix." };
 
-    // --- REVISED: More robust competency column identification ---
-    const allDefinedCompetencies = [
-        "TRUSTWORTHINESS", "ENTREPRENEURIAL SPIRIT", "INNOVATION", "LEADERSHIP", "RESPECT FOR THE INDIVIDUAL",
-        "LEADERSHIP BY EXAMPLE", "DRIVE FOR RESULTS", "COACHING FOR SUCCESS", "INSPIRING LOYAL AND TRUST",
-        "WORKING ACROSS TEAMS", "TALENT MANAGEMENT AND DEVELOPMENT", "EMPOWERMENT", "COMMUNICATION", "EXECUTIVE DISPOSITION",
-        "PROJECT MANAGEMENT", "LEAN THINKING PRINCIPLES", "PROCESS STANDARDIZATION", "OPERATIONAL EXPERTISE",
-        "COST MANAGEMENT", "DATA-DRIVEN DECISION MAKING", "MANAGEMENT OF WORK SYSTEMS/BUSINESS PROCESS ORIENTATION"
-    ];
+    // 2. Filter Employees based on Selection & Scope
+    const filteredEmployees = compData.filter(row => {
+      const empId = String(row[compEmpIdIndex]).trim();
+      const loc = employeeLocationMap.get(empId);
+      
+      if (!loc) return false; 
+
+      // Scope Check
+      if (!permissions.allowedScopes.includes('ALL')) {
+         if (!isScopeAllowed(loc.department, permissions.allowedScopes) && 
+             !isScopeAllowed(loc.division, permissions.allowedScopes)) {
+             return false; 
+         }
+      }
+
+      // Filter Check
+      if (activeFilters.division && activeFilters.division !== 'all' && loc.division !== activeFilters.division) return false;
+      if (activeFilters.group && activeFilters.group !== 'all' && loc.group !== activeFilters.group) return false;
+      if (activeFilters.department && activeFilters.department !== 'all' && loc.department !== activeFilters.department) return false;
+      if (activeFilters.section && activeFilters.section !== 'all' && loc.section !== activeFilters.section) return false;
+
+      return true;
+    });
+
+    if (filteredEmployees.length === 0) return { headers: [], employeeScores: [] };
+
+    // 3. Build Smart Columns
+    const competencyColumns = [];
+    const competencyHeaders = [];
+    const allDefinedCompetencies = getAllCompetencies();
 
     allDefinedCompetencies.forEach(competencyName => {
-        let actualIndex = compHeaders.indexOf(`${competencyName} [Actual]`);
-
-        // Fallback for headers that might just have the competency name
-        if (actualIndex === -1) {
-            const indices = compHeaders.map((h, i) => (h.trim().toUpperCase() === competencyName ? i : -1)).filter(i => i !== -1);
-            if (indices.length >= 2) {
-                actualIndex = indices[1]; // Assume the second column is 'Actual'
-            }
-        }
+        // Find columns in matrix (Required vs Actual)
+        const indices = compHeaders.map((h, i) => (h === competencyName ? i : -1)).filter(i => i !== -1);
+        
+        let actualIndex = -1;
+        // Logic: Usually 1st is Required, 2nd is Actual.
+        if (indices.length >= 2) actualIndex = indices[1]; 
         
         if (actualIndex !== -1) {
-            competencyColumns.push({ name: competencyName, index: actualIndex });
-            competencyHeaderNames.push(competencyName);
+            // --- NEW: RELEVANCE CHECK ---
+            // Check if ANY employee in the filtered list has a score > 0 for this competency.
+            const isRelevant = filteredEmployees.some(row => {
+                const score = parseFloat(row[actualIndex]);
+                return !isNaN(score) && score > 0;
+            });
+
+            // Only add the column if at least one person has a score
+            if (isRelevant) {
+                const cleanName = competencyName.replace(/^(CORE|LEAD|TECH)\s?-\s?/i, '');
+                let category = "OTHER";
+                if (competencyName.startsWith("CORE")) category = "CORE";
+                else if (competencyName.startsWith("LEAD")) category = "LEADERSHIP";
+                else if (competencyName.startsWith("TECH")) category = "TECHNICAL";
+
+                competencyColumns.push({ name: cleanName, index: actualIndex });
+                competencyHeaders.push({ name: cleanName, category: category });
+            }
         }
     });
-    // --- END REVISED SECTION ---
 
-    // Structure the data for the frontend
-    const employeeScores = departmentEmployees.map(row => {
+    // 4. Map Scores
+    const employeeScores = filteredEmployees.map(row => {
       const scores = competencyColumns.map(col => {
-        return parseFloat(row[col.index]) || 0;
+        const val = parseFloat(row[col.index]);
+        return (val > 0) ? val : ""; 
       });
-      return {
-        name: row[compNameIndex],
-        scores: scores
-      };
+      return { name: row[compNameIndex] || 'Unknown', scores: scores };
     });
 
-    return {
-      headers: competencyHeaderNames,
-      employeeScores: employeeScores
-    };
+    return { headers: competencyHeaders, employeeScores: employeeScores };
 
   } catch (e) {
     Logger.log('Error in getTeamCompetencyHeatmap: ' + e.message);
@@ -2984,66 +3592,65 @@ function getTeamCompetencyHeatmap(department) {
 }
 
 /**
- * Fetches data for a deep dive into a specific competency for an employee.
- * @param {string} employeeId The ID of the employee.
- * @param {string} competencyName The name of the competency.
- * @returns {Object} An object containing the deep dive data.
+ * REVISED: Fetches deep dive data, handling "CORE - " prefixes in headers.
  */
 function getCompetencyDeepDive(employeeId, competencyName) {
   if (!employeeId || !competencyName) return { error: 'Employee ID or competency name not specified.' };
 
   try {
+    // 1. Open Sheets
     const hubSs = SpreadsheetApp.getActiveSpreadsheet();
     const mainSheet = hubSs.getSheets()[0];
     const compSs = SpreadsheetApp.openById(COMPETENCY_SPREADSHEET_ID);
     const compSheet = compSs.getSheetByName('Competency Matrix');
 
-    if (!mainSheet || !compSheet) {
-      return { error: 'Required sheets not found.' };
+    if (!mainSheet || !compSheet) return { error: 'Required sheets not found.' };
+
+    // 2. Get Data & Normalize Headers
+    const compData = compSheet.getDataRange().getValues();
+    const rawCompHeaders = compData.shift();
+    const compHeaders = rawCompHeaders.map(h => h.toString().replace(/\s+/g, ' ').trim().toUpperCase());
+    
+    const compEmpIdIndex = compHeaders.indexOf('EMPLOYEE ID');
+    const compNameIndex = compHeaders.indexOf('EMPLOYEE NAME');
+
+    if (compEmpIdIndex === -1) return { error: "Header 'EMPLOYEE ID' not found." };
+
+    // 3. Find the Columns for this Competency
+    // We must match "WORK-LIFE BALANCE" against "CORE - WORK-LIFE BALANCE"
+    const targetName = competencyName.toString().trim().toUpperCase();
+    
+    const indices = compHeaders.map((h, i) => {
+        // Strip the prefix (CORE -, LEAD -, TECH -) from the header before comparing
+        const cleanHeader = h.replace(/^(CORE|LEAD|TECH)\s?-\s?/i, '');
+        return (cleanHeader === targetName) ? i : -1;
+    }).filter(i => i !== -1);
+
+    let actualScoreIndex = -1;
+    // Logic: 1st is Required, 2nd is Actual.
+    if (indices.length >= 2) {
+        actualScoreIndex = indices[1]; 
+    } else {
+        return { error: `Competency '${competencyName}' score column not found.` };
     }
 
-    // Get department data from main sheet
+    // 4. Get Employee Department (for Team Avg)
     const mainData = mainSheet.getDataRange().getValues();
     const mainHeaders = mainData.shift();
     const mainEmpIdIndex = mainHeaders.indexOf('Employee ID');
     const mainDeptIndex = mainHeaders.indexOf('Department');
     const employeeToDeptMap = new Map();
-    mainData.forEach(row => {
-      if (row[mainEmpIdIndex] && row[mainDeptIndex]) {
-        employeeToDeptMap.set(String(row[mainEmpIdIndex]).trim(), row[mainDeptIndex]);
-      }
-    });
     
-    // Get competency data
-    const compData = compSheet.getDataRange().getValues();
-    const rawCompHeaders = compData.shift();
-    const compHeaders = rawCompHeaders.map(h => (h || '').toString().replace(/\n|\r/g, ' ').trim());
-    const compEmpIdIndex = compHeaders.indexOf('EMPLOYEE ID');
-    const compNameIndex = compHeaders.indexOf('EMPLOYEE NAME');
-    
-    let actualScoreIndex = -1;
-    let requiredScoreIndex = -1;
-
-    // Flexible header finding
-    const requiredHeader = `${competencyName} [Required]`;
-    const actualHeader = `${competencyName} [Actual]`;
-    
-    actualScoreIndex = compHeaders.indexOf(actualHeader);
-    
-    // Fallback for headers that might just have the competency name
-    if (actualScoreIndex === -1) {
-        const indices = compHeaders.map((h, i) => (h.trim() === competencyName ? i : -1)).filter(i => i !== -1);
-        if (indices.length >= 2) {
-          requiredScoreIndex = indices[0];
-          actualScoreIndex = indices[1];
-        }
+    if (mainEmpIdIndex !== -1 && mainDeptIndex !== -1) {
+        mainData.forEach(row => {
+           if (row[mainEmpIdIndex] && row[mainDeptIndex]) {
+             employeeToDeptMap.set(String(row[mainEmpIdIndex]).trim(), row[mainDeptIndex]);
+           }
+        });
     }
+    const employeeDept = employeeToDeptMap.get(String(employeeId).trim());
 
-    if (actualScoreIndex === -1) {
-        return { error: `Competency '${competencyName}' score column not found.`};
-    }
-    
-    // --- CALCULATIONS ---
+    // 5. Calculate Scores & Averages
     let employeeScore = 0;
     let teamTotalScore = 0;
     let teamMemberCount = 0;
@@ -3051,29 +3658,27 @@ function getCompetencyDeepDive(employeeId, competencyName) {
     let companyMemberCount = 0;
     const topPerformers = [];
 
-    const employeeDept = employeeToDeptMap.get(String(employeeId).trim());
-
     compData.forEach(row => {
       const currentEmpId = String(row[compEmpIdIndex]).trim();
       const score = parseFloat(row[actualScoreIndex]) || 0;
       
       if(score > 0) {
-        // Company-wide calculation
+        // Company-wide
         companyTotalScore += score;
         companyMemberCount++;
 
-        // Team calculation
+        // Team-wide
         if (employeeDept && employeeToDeptMap.get(currentEmpId) === employeeDept) {
           teamTotalScore += score;
           teamMemberCount++;
         }
 
-        // Employee's specific score
+        // Selected Employee
         if (currentEmpId === String(employeeId).trim()) {
           employeeScore = score;
         }
 
-        // Top performers list
+        // Top Performers List
         topPerformers.push({ name: row[compNameIndex], score: score });
       }
     });
@@ -3081,7 +3686,7 @@ function getCompetencyDeepDive(employeeId, competencyName) {
     const teamAverage = teamMemberCount > 0 ? (teamTotalScore / teamMemberCount) : 0;
     const companyAverage = companyMemberCount > 0 ? (companyTotalScore / companyMemberCount) : 0;
 
-    // Sort and get top 5 performers
+    // Sort top 5
     const sortedTopPerformers = topPerformers
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
@@ -3224,53 +3829,154 @@ function submitChangeRequest(requestData) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName('Org Chart Requests');
-    if (!sheet) {
-      throw new Error('"Org Chart Requests" sheet not found.');
-    }
-    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    if (!sheet) throw new Error('"Org Chart Requests" sheet not found.');
     
-    const requestId = 'REQ-' + new Date().getTime();
-    let folderUrl = '';
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const headerMap = new Map(headers.map((h, i) => [h.toString().replace(/\s+/g, '').toLowerCase(), i]));
+    
+    let requestId = requestData.RequestID;
+    let rowIndex = -1;
+    let isUpdate = false;
 
-    // Handle file uploads
+    if (requestId && sheet.getLastRow() > 1) {
+        const idColIdx = headerMap.get('requestid');
+        const allIds = sheet.getRange(2, idColIdx + 1, sheet.getLastRow() - 1, 1).getValues().flat();
+        const foundIdx = allIds.findIndex(id => String(id).trim() === String(requestId).trim());
+        
+        if (foundIdx !== -1) {
+            rowIndex = foundIdx + 2; 
+            isUpdate = true;
+        }
+    }
+
+    if (!isUpdate) {
+        requestId = 'REQ-' + new Date().getTime();
+    }
+
+    let folderUrl = '';
     if (requestData.files && requestData.files.length > 0) {
       const parentFolder = DriveApp.getFolderById(CHANGE_REQUESTS_FOLDER_ID);
-      const requestFolder = parentFolder.createFolder(requestId);
+      let requestFolder;
+      if (isUpdate) {
+          const existingFolders = parentFolder.getFoldersByName(requestId);
+          if (existingFolders.hasNext()) {
+              requestFolder = existingFolders.next();
+          } else {
+              requestFolder = parentFolder.createFolder(requestId);
+          }
+      } else {
+          requestFolder = parentFolder.createFolder(requestId);
+      }
+      requestFolder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
       
       requestData.files.forEach(file => {
         const decodedContent = Utilities.base64Decode(file.content);
-        const blob = Utilities.newBlob(decodedContent, file.mimeType, file.name);
+        const fileName = file.label ? `[${file.label}] ${file.name}` : file.name;
+        const blob = Utilities.newBlob(decodedContent, file.mimeType, fileName);
         requestFolder.createFile(blob);
       });
-      
       folderUrl = requestFolder.getUrl();
     }
 
-    const newRow = headers.map(header => {
-      switch (header) {
-        case 'RequestID':
-          return requestId;
-        case 'RequestorEmail':
-          return Session.getActiveUser().getEmail();
-        case 'SubmissionTimestamp':
-          return new Date();
-        case 'Status':
-          return 'Pending';
-        case 'SupportingDocuments':
-          return folderUrl;
+    const userEmail = Session.getActiveUser().getEmail();
+    const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+    const logEntry = isUpdate 
+        ? `[${timestamp}] RESUBMITTED by ${userEmail}\n` 
+        : `[${timestamp}] SUBMITTED by ${userEmail}\n`;
+
+    const rowDataToSave = headers.map((header, i) => {
+      const normalizedHeader = header.toString().replace(/\s+/g, '').toLowerCase();
+      
+      // --- FIX: FORCE NEWLINE FOR AUDIT TRAIL ---
+      if (normalizedHeader === 'audittrail') {
+          if (isUpdate) {
+              let currentLog = sheet.getRange(rowIndex, i + 1).getValue();
+              // Ensure currentLog is treated as a string and add newline if missing
+              if (currentLog && String(currentLog).length > 0 && !String(currentLog).endsWith('\n')) {
+                  currentLog += '\n';
+              }
+              return currentLog + logEntry;
+          }
+          return logEntry;
+      }
+
+      if (requestData.RequestType === 'Hiring of a new employee (replacement for vacancy)' && 
+         (normalizedHeader === 'newemployeename' || normalizedHeader === 'newemployeeid')) {
+        return '';
+      }
+
+      switch (normalizedHeader) {
+        case 'requestid': return requestId;
+        case 'requestoremail': return userEmail; 
+        case 'submissiontimestamp': return isUpdate ? new Date() : new Date();
+        case 'status': return 'Pending'; 
+        
+        // --- CRITICAL FIX: ACTUALLY SAVE THE APPROVER EMAIL ---
+        // Previously: return isUpdate ? '' : ''; (This was wiping it!)
+        // Now: return requestData.ApproverEmail; (This saves it!)
+        case 'approveremail': return requestData.ApproverEmail; 
+
+        // Reset these fields on resubmit
+        case 'approvaltimestamp': return isUpdate ? '' : '';
+        case 'approvercomments': return isUpdate ? '' : ''; 
+
+        case 'supportingdocuments': return folderUrl || (isUpdate ? sheet.getRange(rowIndex, i+1).getValue() : '');
+        
+        case 'employeeid': return requestData.EmployeeID || '';
+        case 'datehired': return requestData.DateHired || '';
+        case 'dateofbirth': return requestData.DateOfBirth || '';
+        case 'gender': return requestData.Gender || '';
+        case 'effectivedate': return requestData.EffectiveDate || '';
+        case 'reasonforleaving': return requestData.ReasonForLeaving || '';
+        case 'action': return requestData.Action || '';
+
         default:
-          return requestData[header] || '';
+          const key = Object.keys(requestData).find(k => k.toLowerCase() === normalizedHeader);
+          return key ? requestData[key] : (isUpdate ? sheet.getRange(rowIndex, i+1).getValue() : '');
       }
     });
     
-    sheet.appendRow(newRow);
-    return 'Request submitted successfully.';
+    if (isUpdate) {
+        sheet.getRange(rowIndex, 1, 1, rowDataToSave.length).setValues([rowDataToSave]);
+        return 'Request resubmitted successfully.';
+    } else {
+        sheet.appendRow(rowDataToSave);
+        return 'Request submitted successfully.';
+    }
+
   } catch (e) {
     Logger.log('Error in submitChangeRequest: ' + e.message);
     throw new Error('Failed to submit request. ' + e.message);
   }
 }
 
+function getApproverList() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('Permissions');
+    if (!sheet || sheet.getLastRow() < 2) {
+      return [];
+    }
+    const data = sheet.getDataRange().getValues();
+    const headers = data.shift();
+    const emailIndex = headers.indexOf('EMAIL');
+    const approverIndex = headers.indexOf('Is Approver');
+
+    if (emailIndex === -1 || approverIndex === -1) {
+      return [];
+    }
+
+    const approvers = data
+      .filter(row => (row[approverIndex] || '').toString().trim().toLowerCase() === 'x')
+      .map(row => ({ email: row[emailIndex] }))
+      .sort((a, b) => a.email.localeCompare(b.email));
+      
+    return approvers;
+  } catch (e) {
+    Logger.log('Error in getApproverList: ' + e.message);
+    throw new Error('Could not retrieve approver list.');
+  }
+}
 // --- END: CHANGE REQUEST FUNCTIONS ---
 
 /**
@@ -3435,27 +4141,21 @@ function getCompetencyEmployeeList() {
  */
 function getEmployeeCompetencyProfile(employeeId) {
   if (!employeeId) return { error: 'No employee ID provided.' };
-
   try {
     const ss = SpreadsheetApp.openById(COMPETENCY_SPREADSHEET_ID);
     const sheet = ss.getSheetByName('Competency Matrix');
-    if (!sheet) {
-      return { error: "The 'Competency Matrix' sheet was not found." };
-    }
+    if (!sheet) return { error: "The 'Competency Matrix' sheet was not found." };
+
     const data = sheet.getDataRange().getValues();
     const rawHeaders = data.shift();
-    const headers = rawHeaders.map(header => header.replace(/\n|\r/g, ' ').trim());
-
+    // Normalize headers to match Config (uppercase, single spaces)
+    const headers = rawHeaders.map(h => h.toString().replace(/\s+/g, ' ').trim().toUpperCase());
+    
     const empIdIndex = headers.indexOf('EMPLOYEE ID');
-    if (empIdIndex === -1) {
-      return { error: "Header 'EMPLOYEE ID' not found in Competency Matrix." };
-    }
+    if (empIdIndex === -1) return { error: "Header 'EMPLOYEE ID' not found." };
 
     const employeeRow = data.find(row => String(row[empIdIndex]).trim() === String(employeeId).trim());
-
-    if (!employeeRow) {
-      return { error: 'Employee not found in Competency Matrix.' };
-    }
+    if (!employeeRow) return { error: 'Employee not found in Competency Matrix.' };
 
     const profile = {
       core: { labels: [], actual: [], required: [] },
@@ -3463,52 +4163,47 @@ function getEmployeeCompetencyProfile(employeeId) {
       technical: { labels: [], actual: [], required: [] }
     };
 
-    const coreCompetencies = ["TRUSTWORTHINESS", "ENTREPRENEURIAL SPIRIT", "INNOVATION", "LEADERSHIP", "RESPECT FOR THE INDIVIDUAL"];
-    const leadershipCompetencies = ["LEADERSHIP BY EXAMPLE", "DRIVE FOR RESULTS", "COACHING FOR SUCCESS", "INSPIRING LOYAL AND TRUST", "WORKING ACROSS TEAMS", "TALENT MANAGEMENT AND DEVELOPMENT", "EMPOWERMENT", "COMMUNICATION", "EXECUTIVE DISPOSITION"];
-    const technicalCompetencies = ["PROJECT MANAGEMENT", "LEAN THINKING PRINCIPLES", "PROCESS STANDARDIZATION", "OPERATIONAL EXPERTISE", "COST MANAGEMENT", "DATA-DRIVEN DECISION MAKING", "MANAGEMENT OF WORK SYSTEMS/BUSINESS PROCESS ORIENTATION"];
-    
-    const allCompetencyNames = [...coreCompetencies, ...leadershipCompetencies, ...technicalCompetencies];
-    
-    allCompetencyNames.forEach(competencyName => {
-      let requiredIndex = -1;
-      let actualIndex = -1;
-
-      requiredIndex = headers.indexOf(`${competencyName} [Required]`);
-      actualIndex = headers.indexOf(`${competencyName} [Actual]`);
-
-      if (requiredIndex === -1 || actualIndex === -1) {
-        const indices = headers.map((h, i) => (h.trim() === competencyName ? i : -1)).filter(i => i !== -1);
-        if (indices.length >= 2) {
-          requiredIndex = indices[0];
-          actualIndex = indices[1];
-        }
-      }
-      
-      if (requiredIndex !== -1 && actualIndex !== -1) {
-        const requiredValue = parseFloat(employeeRow[requiredIndex]) || 0;
-        const actualValue = parseFloat(employeeRow[actualIndex]) || 0;
+    // Helper to process competencies
+    const processCompetencyList = (list, categoryKey) => {
+      list.forEach(headerName => {
+        // Header name from config is already normalized
+        const upperName = headerName; 
         
-        // --- THIS IS THE KEY IMPROVEMENT ---
-        // Only include the competency if it's relevant to the employee (score > 0)
-        if (requiredValue > 0 || actualValue > 0) {
-          let category;
-          if (coreCompetencies.includes(competencyName)) category = profile.core;
-          else if (leadershipCompetencies.includes(competencyName)) category = profile.leadership;
-          else if (technicalCompetencies.includes(competencyName)) category = profile.technical;
+        // Find ALL columns matching this name (Expected: 3 columns)
+        const indices = headers.map((h, i) => (h === upperName ? i : -1)).filter(i => i !== -1);
+        
+        // Logic: 1st is Required, 2nd is Actual. 3rd (Gap) is ignored.
+        if (indices.length >= 2) {
+          const requiredIndex = indices[0];
+          const actualIndex = indices[1];
+          
+          const requiredValue = parseFloat(employeeRow[requiredIndex]) || 0;
+          const actualValue = parseFloat(employeeRow[actualIndex]) || 0;
 
-          if (category && !category.labels.includes(competencyName)) {
-            category.labels.push(competencyName);
-            category.required.push(requiredValue);
-            category.actual.push(actualValue);
+          // DATA ONLY VIEW: Only add to chart if there is data
+          if (requiredValue > 0 || actualValue > 0) {
+             // CLEAN NAME: Remove the prefix (CORE -, LEAD -, TECH -) for the chart label
+             const cleanName = headerName.replace(/^(CORE|LEAD|TECH)\s?-\s?/i, '');
+             
+             profile[categoryKey].labels.push(cleanName);
+             profile[categoryKey].required.push(requiredValue);
+             profile[categoryKey].actual.push(actualValue);
           }
         }
-      }
-    });
+      });
+    };
+
+    // Fetch dynamic config automatically
+    const dynamicConfig = getCompetencyConfig(); 
+    
+    processCompetencyList(dynamicConfig.CORE, 'core');
+    processCompetencyList(dynamicConfig.LEADERSHIP, 'leadership');
+    processCompetencyList(dynamicConfig.TECHNICAL, 'technical');
 
     return profile;
 
   } catch (e) {
-    Logger.log('Error in getEmployeeCompetencyProfile: ' + e.message + ' Stack: ' + e.stack);
+    Logger.log('Error in getEmployeeCompetencyProfile: ' + e.message);
     return { error: e.message };
   }
 }
@@ -3521,6 +4216,12 @@ function getEmployeeCompetencyProfile(employeeId) {
  * @returns {Object} An object containing all competency analytics.
  */
 function getCompetencyAnalytics(employeeId) {
+  // 1. Security Check
+  const permissions = getSessionPermissions();
+  if (!permissions.hasModuleAccess) {
+    return { error: "Access Denied: You do not have permission to view Competency data." };
+  }
+
   if (!employeeId) return { error: 'No employee ID provided.' };
 
   try {
@@ -3530,31 +4231,55 @@ function getCompetencyAnalytics(employeeId) {
     const compSheet = compSs.getSheetByName('Competency Matrix');
     const historySheet = compSs.getSheetByName('Competency History');
 
-    // (This part for current data remains the same)
     if (!compSheet) return { error: "The 'Competency Matrix' sheet was not found." };
+    
     const compData = compSheet.getDataRange().getValues();
     const rawHeaders = compData.shift();
-    const headers = rawHeaders.map(header => header.replace(/\n|\r/g, ' ').trim());
+    const headers = rawHeaders.map(h => h.toString().replace(/\s+/g, ' ').trim().toUpperCase());
     const compEmpIdIndex = headers.indexOf('EMPLOYEE ID');
-    if (compEmpIdIndex === -1) return { error: "Header 'EMPLOYEE ID' not found in Competency Matrix." };
+    if (compEmpIdIndex === -1) return { error: "Header 'EMPLOYEE ID' not found." };
+    
     const employeeRow = compData.find(row => String(row[compEmpIdIndex]).trim() === String(employeeId).trim());
     if (!employeeRow) return { error: 'Employee not found in Competency Matrix.' };
 
+    // Get Employee Department and Validate Scope
     const employeeDepartmentMap = new Map();
     let selectedEmployeeDept = null;
+    let selectedEmployeeDiv = null;
+
     if (mainSheet) {
       const mainData = mainSheet.getDataRange().getValues();
       const mainHeaders = mainData.shift();
       const mainEmpIdIndex = mainHeaders.indexOf('Employee ID');
       const mainDeptIndex = mainHeaders.indexOf('Department');
+      const mainDivIndex = mainHeaders.indexOf('Division'); // Added Division
+
       if (mainEmpIdIndex !== -1 && mainDeptIndex !== -1) {
+        // Find target employee row specifically for scope check
+        const targetMainRow = mainData.find(row => String(row[mainEmpIdIndex]).trim() === String(employeeId).trim());
+        
+        if (targetMainRow) {
+            selectedEmployeeDept = targetMainRow[mainDeptIndex];
+            selectedEmployeeDiv = (mainDivIndex !== -1) ? targetMainRow[mainDivIndex] : null;
+
+            // --- SCOPE VALIDATION ---
+            if (!permissions.allowedScopes.includes('ALL')) {
+                const deptAllowed = isScopeAllowed(selectedEmployeeDept, permissions.allowedScopes);
+                const divAllowed = isScopeAllowed(selectedEmployeeDiv, permissions.allowedScopes);
+                
+                if (!deptAllowed && !divAllowed) {
+                    return { error: "Access Denied: This employee is outside your viewable scope." };
+                }
+            }
+            // ------------------------
+        }
+
         mainData.forEach(row => {
           const empId = String(row[mainEmpIdIndex]).trim();
           const dept = row[mainDeptIndex];
           if (empId && dept) employeeDepartmentMap.set(empId, dept);
         });
       }
-      selectedEmployeeDept = employeeDepartmentMap.get(String(employeeId).trim());
     }
 
     const profile = {
@@ -3563,102 +4288,91 @@ function getCompetencyAnalytics(employeeId) {
       technical: { labels: [], actual: [], required: [], team: [] }
     };
     const allGaps = [];
-    const coreCompetencies = ["TRUSTWORTHINESS", "ENTREPRENEURIAL SPIRIT", "INNOVATION", "LEADERSHIP", "RESPECT FOR THE INDIVIDUAL"];
-    const leadershipCompetencies = ["LEADERSHIP BY EXAMPLE", "DRIVE FOR RESULTS", "COACHING FOR SUCCESS", "INSPIRING LOYAL AND TRUST", "WORKING ACROSS TEAMS", "TALENT MANAGEMENT AND DEVELOPMENT", "EMPOWERMENT", "COMMUNICATION", "EXECUTIVE DISPOSITION"];
-    const technicalCompetencies = ["PROJECT MANAGEMENT", "LEAN THINKING PRINCIPLES", "PROCESS STANDARDIZATION", "OPERATIONAL EXPERTISE", "COST MANAGEMENT", "DATA-DRIVEN DECISION MAKING", "MANAGEMENT OF WORK SYSTEMS/BUSINESS PROCESS ORIENTATION"];
-    const allCompetencyNames = [...coreCompetencies, ...leadershipCompetencies, ...technicalCompetencies];
-    allCompetencyNames.forEach(competencyName => {
-      let requiredIndex = -1, actualIndex = -1;
-      const indices = headers.map((h, i) => (h.trim() === competencyName ? i : -1)).filter(i => i !== -1);
-      if (indices.length >= 2) {
-        requiredIndex = indices[0];
-        actualIndex = indices[1];
-      }
-      if (requiredIndex !== -1 && actualIndex !== -1) {
-        const requiredValue = parseFloat(employeeRow[requiredIndex]) || 0;
-        const actualValue = parseFloat(employeeRow[actualIndex]) || 0;
-        if (requiredValue > 0 || actualValue > 0) {
-          allGaps.push({ name: competencyName, gap: actualValue - requiredValue });
-          let teamTotal = 0, teamMemberCount = 0;
-          if (selectedEmployeeDept) {
-            compData.forEach(row => {
-              const currentEmpId = String(row[compEmpIdIndex]).trim();
-              if (employeeDepartmentMap.get(currentEmpId) === selectedEmployeeDept) {
-                teamTotal += parseFloat(row[actualIndex]) || 0;
-                teamMemberCount++;
-              }
-            });
-          }
-          const teamAverage = (teamMemberCount > 0) ? (teamTotal / teamMemberCount) : 0;
-          let category;
-          if (coreCompetencies.includes(competencyName)) category = profile.core;
-          else if (leadershipCompetencies.includes(competencyName)) category = profile.leadership;
-          else if (technicalCompetencies.includes(competencyName)) category = profile.technical;
-          if (category && !category.labels.includes(competencyName)) {
-            category.labels.push(competencyName);
-            category.required.push(requiredValue);
-            category.actual.push(actualValue);
-            category.team.push(parseFloat(teamAverage.toFixed(2)));
+
+    // Fetch dynamic config
+    const dynamicConfig = getCompetencyConfig(); 
+
+    const processCategory = (list, categoryKey) => {
+      list.forEach(headerName => {
+        const upperName = headerName; // Already normalized in config
+        const indices = headers.map((h, i) => (h === upperName ? i : -1)).filter(i => i !== -1);
+        
+        if (indices.length >= 2) {
+          const requiredIndex = indices[0];
+          const actualIndex = indices[1];
+          
+          const requiredValue = parseFloat(employeeRow[requiredIndex]) || 0;
+          const actualValue = parseFloat(employeeRow[actualIndex]) || 0;
+
+          if (requiredValue > 0 || actualValue > 0) {
+            // Clean Name for display
+            const cleanName = headerName.replace(/^(CORE|LEAD|TECH)\s?-\s?/i, '');
+            
+            allGaps.push({ name: cleanName, gap: actualValue - requiredValue });
+            
+            // Team Avg Calculation
+            let teamTotal = 0, teamMemberCount = 0;
+            if (selectedEmployeeDept) {
+              compData.forEach(row => {
+                const currentEmpId = String(row[compEmpIdIndex]).trim();
+                if (employeeDepartmentMap.get(currentEmpId) === selectedEmployeeDept) {
+                  const val = parseFloat(row[actualIndex]) || 0;
+                  if(val > 0) { 
+                      teamTotal += val;
+                      teamMemberCount++;
+                  }
+                }
+              });
+            }
+            const teamAverage = (teamMemberCount > 0) ? (teamTotal / teamMemberCount) : 0;
+
+            if (!profile[categoryKey].labels.includes(cleanName)) {
+              profile[categoryKey].labels.push(cleanName);
+              profile[categoryKey].required.push(requiredValue);
+              profile[categoryKey].actual.push(actualValue);
+              profile[categoryKey].team.push(parseFloat(teamAverage.toFixed(2)));
+            }
           }
         }
-      }
-    });
+      });
+    };
+
+    processCategory(dynamicConfig.CORE, 'core');
+    processCategory(dynamicConfig.LEADERSHIP, 'leadership');
+    processCategory(dynamicConfig.TECHNICAL, 'technical');
+
+    // Sort Strengths and Gaps
     allGaps.sort((a, b) => b.gap - a.gap);
     const strengths = allGaps.filter(item => item.gap > 0).slice(0, 3);
     const gaps = allGaps.filter(item => item.gap < 0).reverse().slice(0, 3);
+
     const allActuals = [...profile.core.actual, ...profile.leadership.actual, ...profile.technical.actual];
     const allRequired = [...profile.core.required, ...profile.leadership.required, ...profile.technical.required];
     const overallActual = allActuals.length > 0 ? (allActuals.reduce((a, b) => a + b, 0) / allActuals.length) : 0;
     const overallRequired = allRequired.length > 0 ? (allRequired.reduce((a, b) => a + b, 0) / allRequired.length) : 0;
 
-    // --- REVISED: Process Historical Data with robust header matching and logging ---
+    // Historical Data logic (Unchanged, kept for completeness)
     const historicalData = { labels: [], datasets: [] };
     if (historySheet) {
-      Logger.log("Processing 'Competency History' sheet.");
       const histData = historySheet.getDataRange().getValues();
       const rawHistHeaders = histData.shift();
-      // Clean headers: remove newlines, trim, and convert to uppercase for robust matching.
       const histHeaders = rawHistHeaders.map(h => (h || '').toString().replace(/\n|\r/g, ' ').trim().toUpperCase());
-      
-      Logger.log("Cleaned History Headers: " + JSON.stringify(histHeaders));
-
-      // Find the correct column indices using the cleaned, uppercase headers.
       const histEmpIdIndex = histHeaders.indexOf('EMPLOYEE ID');
       const histYearIndex = histHeaders.indexOf('ASSESSMENT YEAR');
       const histActualAvgIndex = histHeaders.indexOf('ACTUAL AVERAGE');
       const histGapAvgIndex = histHeaders.indexOf('GAP AVERAGE');
 
-      Logger.log(`Header Indices Found: empId=${histEmpIdIndex}, year=${histYearIndex}, actualAvg=${histActualAvgIndex}, gapAvg=${histGapAvgIndex}`);
-
       if (histEmpIdIndex !== -1 && histYearIndex !== -1 && histActualAvgIndex !== -1 && histGapAvgIndex !== -1) {
-        Logger.log("All required history headers found. Filtering for employee: " + employeeId);
-
         const employeeHistoryRows = histData
           .filter(row => String(row[histEmpIdIndex]).trim() === String(employeeId).trim())
           .sort((a, b) => a[histYearIndex] - b[histYearIndex]);
 
-        Logger.log("Found " + employeeHistoryRows.length + " historical rows for this employee.");
-
         if (employeeHistoryRows.length > 0) {
             historicalData.labels = employeeHistoryRows.map(row => row[histYearIndex].toString());
-            
-            historicalData.datasets.push({
-                label: "Overall Actual Average",
-                data: employeeHistoryRows.map(row => parseFloat(row[histActualAvgIndex]) || null)
-            });
-
-            historicalData.datasets.push({
-                label: "Overall Gap Average",
-                data: employeeHistoryRows.map(row => parseFloat(row[histGapAvgIndex]) || null)
-            });
-
-            Logger.log("Successfully prepared historical data for chart: " + JSON.stringify(historicalData));
+            historicalData.datasets.push({ label: "Overall Actual Average", data: employeeHistoryRows.map(row => parseFloat(row[histActualAvgIndex]) || null) });
+            historicalData.datasets.push({ label: "Overall Gap Average", data: employeeHistoryRows.map(row => parseFloat(row[histGapAvgIndex]) || null) });
         }
-      } else {
-        Logger.log("One or more required headers were NOT found in 'Competency History' sheet.");
       }
-    } else {
-        Logger.log("'Competency History' sheet not found.");
     }
 
     return {
@@ -3673,7 +4387,841 @@ function getCompetencyAnalytics(employeeId) {
     };
 
   } catch (e) {
-    Logger.log('Error in getCompetencyAnalytics: ' + e.message + ' Stack: ' + e.stack);
+    Logger.log('Error in getCompetencyAnalytics: ' + e.message);
     return { error: e.message };
+  }
+}
+
+/**
+ * Gets the org chart data as it would look *if* a specific change request were applied.
+ * Does NOT save any changes to the main sheet.
+ * @param {string} requestId The ID of the change request to preview.
+ * @returns {Array<Object>} An array of employee/position objects representing the preview state.
+ * @throws {Error} If the request ID is not found or simulation fails.
+ */
+function getPreviewOrgChartData(requestId) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const mainSheet = ss.getSheets()[0];
+    const requestSheet = ss.getSheetByName('Org Chart Requests');
+
+    if (!requestSheet) throw new Error('"Org Chart Requests" sheet not found.');
+    if (mainSheet.getLastRow() < 2) throw new Error('Main org chart data sheet is empty.');
+
+    const lastCol = mainSheet.getLastColumn();
+    const mainData = mainSheet.getRange(2, 1, mainSheet.getLastRow() - 1, lastCol).getValues();
+    const mainHeaders = mainSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+
+    const liveObjects = mainData.map(row => {
+      let employee = {};
+      mainHeaders.forEach((header, i) => {
+        const key = header.toLowerCase().replace(/\s+/g, '').replace(/[^a-z0-9]/gi, '');
+        if (row[i] instanceof Date) {
+          employee[key] = Utilities.formatDate(row[i], Session.getScriptTimeZone(), 'yyyy-MM-dd');
+        } else {
+          employee[key] = row[i];
+        }
+      });
+      employee.nodeId = String(employee['positionid'] || '');
+      employee.managerId = String(employee['reportingtoid'] || '');
+      return employee;
+    });
+
+    const requestDataRange = requestSheet.getDataRange();
+    const requestValues = requestDataRange.getValues();
+    const requestHeaders = requestValues[0];
+    const reqIdCol = requestHeaders.indexOf('RequestID');
+    let requestRowData = null;
+
+    for (let i = 1; i < requestValues.length; i++) {
+      if (requestValues[i][reqIdCol] === requestId) {
+        requestRowData = {};
+        requestHeaders.forEach((header, index) => {
+          requestRowData[header] = requestValues[i][index];
+        });
+        break;
+      }
+    }
+
+    if (!requestRowData) throw new Error(`Request ID ${requestId} not found.`);
+
+    let previewObjects = JSON.parse(JSON.stringify(liveObjects));
+    const requestType = requestRowData['RequestType'];
+    let changedPositionIds = new Set();
+    let changeDescription = '';
+
+    const findByEmpId = (empId) => previewObjects.find(p => String(p.employeeid).toUpperCase() === String(empId).toUpperCase());
+    const findByPosId = (posId) => previewObjects.find(p => String(p.positionid).toUpperCase() === String(posId).toUpperCase());
+
+    if (requestType.includes('Transfer') || requestType.includes('Promotion')) {
+      const employeeName = requestRowData['EmployeeName'];
+      const newPositionId = requestRowData['NewPositionID'];
+      changeDescription = `${requestType}: ${employeeName} to ${newPositionId}`;
+      
+      const oldPosition = previewObjects.find(p => p.positionid === requestRowData['CurrentPositionID']);
+      const newPosition = findByPosId(newPositionId);
+
+      if (oldPosition) {
+        oldPosition.isPreviewChange = true;
+        oldPosition.changeType = 'VACATED BY ' + employeeName;
+        changedPositionIds.add(oldPosition.positionid);
+      }
+      if (newPosition) {
+        newPosition.isPreviewChange = true;
+        newPosition.changeType = 'DESTINATION FOR ' + employeeName;
+        changedPositionIds.add(newPosition.positionid);
+      }
+
+    } else if (requestType.includes('replacement for vacancy')) {
+      const vacantPositionId = requestRowData['VacantPositionID'];
+      const newEmployeeName = requestRowData['NewEmployeeName'];
+      changeDescription = `Fill Vacancy: ${newEmployeeName} in ${vacantPositionId}`;
+      
+      const position = findByPosId(vacantPositionId);
+      if (position) {
+        position.employeeid = requestRowData['NewEmployeeID'];
+        position.employeename = newEmployeeName;
+        position.status = 'FILLED VACANCY';
+        position.isPreviewChange = true;
+        position.changeType = 'Replacement of Vacancy';
+        changedPositionIds.add(vacantPositionId);
+      }
+
+    } else if (requestType.includes('newly created position')) {
+      changeDescription = `New Position: ${requestRowData['NewJobTitle']} filled by ${requestRowData['NewEmployeeName']}`;
+      const tempNewPositionId = `PREVIEW-${requestId}`;
+      
+      previewObjects.push({
+        positionid: tempNewPositionId,
+        jobtitle: requestRowData['NewJobTitle'],
+        level: requestRowData['NewLevel'],
+        division: requestRowData['Division'],
+        group: requestRowData['Group'],
+        department: requestRowData['Department'],
+        section: requestRowData['Section'],
+        reportingtoid: requestRowData['ReportingToId'],
+        employeeid: requestRowData['NewEmployeeID'],
+        employeename: requestRowData['NewEmployeeName'],
+        status: 'NEW HIRE',
+        isPreviewChange: true,
+        changeType: 'New Position',
+        nodeId: tempNewPositionId,
+        managerId: requestRowData['ReportingToId']
+      });
+      changedPositionIds.add(tempNewPositionId);
+
+    } else if (requestType.includes('Resignation/Separation')) {
+      changeDescription = `Resignation: ${requestRowData['EmployeeName']}`;
+      const position = findByEmpId(requestRowData['EmployeeID']);
+      if (position) {
+        position.status = 'RESIGNED';
+        position.isPreviewChange = true;
+        position.changeType = 'RESIGNATION';
+        changedPositionIds.add(position.positionid);
+      }
+
+    } else if (requestType.includes('Change in Employment Status') || requestType.includes('Regularization')) {
+      const newStatus = requestType.includes('Regularization') ? 'REGULAR' : requestRowData['NewStatus'];
+      changeDescription = `Status Change: ${newStatus}`;
+      const position = findByEmpId(requestRowData['EmployeeID']);
+      if (position) {
+        position.status = newStatus;
+        position.isPreviewChange = true;
+        position.changeType = `Status: ${newStatus}`;
+        changedPositionIds.add(position.positionid);
+      }
+
+    } else if (requestType.includes('Job Title/Position Change')) {
+      const newTitle = requestRowData['NewJobTitle'];
+      changeDescription = `Title Change: ${newTitle}`;
+      const position = findByEmpId(requestRowData['EmployeeID']);
+      if (position) {
+        position.jobtitle = newTitle;
+        position.isPreviewChange = true;
+        position.changeType = 'TITLE CHANGE';
+        changedPositionIds.add(position.positionid);
+      }
+
+    } else if (requestType.includes('Name Correction')) {
+      const targetName = requestRowData['NewName'] || requestRowData['NewEmployeeName']; 
+      changeDescription = `Name Correction: ${targetName}`;
+      const position = findByEmpId(requestRowData['EmployeeID']);
+      if (position) {
+        position.employeename = targetName;
+        position.isPreviewChange = true;
+        position.changeType = 'NAME UPDATE';
+        changedPositionIds.add(position.positionid);
+      }
+
+    } else if (requestType.includes('Reporting line')) {
+      changeDescription = `Reporting Change: To ${requestRowData['NewReportingToName'] || 'New Manager'}`;
+      const position = findByEmpId(requestRowData['EmployeeID']);
+      if (position) {
+        if(requestRowData['NewReportingToId']) {
+             position.reportingtoid = requestRowData['NewReportingToId'];
+             position.managerId = requestRowData['NewReportingToId'];
+        }
+        position.isPreviewChange = true;
+        position.changeType = 'REPORTING CHANGE';
+        changedPositionIds.add(position.positionid);
+      }
+
+    } else if (requestType.includes('Position on Hold') || requestType.includes('Cancelled') || requestType.includes('Deleted')) {
+      const action = requestRowData['Action']; 
+      changeDescription = `Position Action: ${action}`;
+      const position = findByPosId(requestRowData['CurrentPositionID']);
+      if (position) {
+        if (action && (action.toUpperCase() === 'DELETED' || action.toUpperCase() === 'CANCELLED')) {
+             position.positionstatus = 'INACTIVE';
+             position.changeType = action.toUpperCase();
+        } else {
+             position.status = action;
+             position.changeType = action;
+        }
+        position.isPreviewChange = true;
+        changedPositionIds.add(position.positionid);
+      }
+    }
+
+    const newEmployeeIdToPositionIdMap = new Map();
+    previewObjects.forEach(p => {
+      if (p.employeeid) newEmployeeIdToPositionIdMap.set(String(p.employeeid).trim(), p.positionid);
+    });
+    previewObjects.forEach(p => {
+      const reportingToValue = (p.reportingtoid || '').toString().trim();
+      if (reportingToValue) {
+        if (reportingToValue.includes('-')) {
+          p.managerId = reportingToValue;
+        } else {
+          const newManagerPositionId = newEmployeeIdToPositionIdMap.get(reportingToValue);
+          p.managerId = newManagerPositionId || '';
+        }
+      } else {
+        p.managerId = '';
+      }
+    });
+
+    let finalPreviewObjects = previewObjects;
+    try {
+      let focusUnit = null;
+      let focusLevel = null;
+
+      const changedArr = Array.from(changedPositionIds);
+      if (changedArr.length > 0) {
+          const focusPos = previewObjects.find(p => p.positionid === changedArr[0]);
+          if (focusPos) {
+              focusUnit = focusPos.section || focusPos.department || focusPos.group || focusPos.division;
+              focusLevel = focusPos.section ? 'section' : (focusPos.department ? 'department' : (focusPos.group ? 'group' : 'division'));
+          }
+      }
+
+      if (focusUnit && focusLevel) {
+        const employeesInScope = new Set();
+        const managerQueue = [];
+        previewObjects.forEach(p => {
+          if (p[focusLevel] === focusUnit) {
+            employeesInScope.add(p.positionid);
+            if (p.managerId) managerQueue.push(p.managerId);
+          }
+        });
+        const previewMap = new Map(previewObjects.map(p => [p.positionid, p]));
+        while(managerQueue.length > 0) {
+          const managerPosId = managerQueue.shift();
+          if (managerPosId && !employeesInScope.has(managerPosId)) {
+            employeesInScope.add(managerPosId);
+            const manager = previewMap.get(managerPosId);
+            if (manager && manager.managerId) managerQueue.push(manager.managerId);
+          }
+        }
+        finalPreviewObjects = previewObjects.filter(p => employeesInScope.has(p.positionid));
+      }
+    } catch(filterError) {
+      finalPreviewObjects = previewObjects;
+    }
+
+    const sanitizedObjects = finalPreviewObjects.map(obj => {
+      const sanitizedObj = {};
+      for (const key in obj) {
+        if (obj[key] instanceof Date) {
+          sanitizedObj[key] = Utilities.formatDate(obj[key], Session.getScriptTimeZone(), 'yyyy-MM-dd');
+        } else {
+          sanitizedObj[key] = obj[key];
+        }
+      }
+      return sanitizedObj;
+    });
+
+    return {
+        chartData: sanitizedObjects,
+        highlightIds: Array.from(changedPositionIds),
+        changeDescription: changeDescription || requestType
+     };
+
+  } catch (e) {
+    Logger.log('Error in getPreviewOrgChartData for request ID ' + requestId + ': ' + e.message + ' Stack: ' + e.stack);
+    return { error: 'Failed to generate preview data. ' + e.message };
+  }
+}
+
+/**
+ * =================================================================================================
+ * AI JOB DESCRIPTION BUILDER MODULE
+ * =================================================================================================
+ */
+
+/**
+ * Main entry point for generating a JD via AI.
+ * @param {Object} inputData - Contains type ('workload' or 'upload'), job details, content, and competencies.
+ * @returns {Object} Structured JSON following the organization's JD format.
+ */
+function generateJobDescriptionAI(inputData) {
+  // 1. Prepare Content (Text or File)
+  let contentToProcess = inputData.content;
+  if (inputData.type === 'upload' && inputData.file) {
+    contentToProcess = extractTextFromUploadedFile(inputData.file);
+  }
+
+  // 2. Define the System Prompt (The Rules)
+  const systemPrompt = `
+    You are an expert HR Specialist. Your task is to write a professional Job Description based on the input provided.
+    
+    OUTPUT FORMAT:
+    You must return a valid JSON object with the following structure. Do not use Markdown formatting (no \`\`\`json).
+    {
+      "OrganizationalRole": "A summary paragraph of the role.",
+      "KPIs": ["List of 3-5 key performance indicators"],
+      "CoreResponsibilities": { 
+          "Planning": ["List of tasks..."], 
+          "Leading": ["List of tasks..."], 
+          "Organizing": ["List of tasks..."], 
+          "Controlling": ["List of tasks..."] 
+      },
+      "SupportingResponsibilities": { 
+          "Planning": ["..."], "Leading": ["..."], "Organizing": ["..."], "Controlling": ["..."] 
+      },
+      "OrganizationalRelationship": "Description of reporting lines and subordinates.",
+      "ProductivityTools": ["List of software/tools"],
+      "WorkingConditions": "Description of environment, travel, etc.",
+      "KeyQualifications": { 
+          "Knowledge": ["List..."], 
+          "Experience": ["List..."], 
+          "Competencies": ["List..."], 
+          "PersonalAttributes": ["List..."] 
+      },
+      "PreferredInternal": "Description of preferred internal candidates (optional)",
+      "PreferredExternal": "Description of preferred external candidates (optional)",
+      "LDMatrix": ["List of recommended trainings"]
+    }
+  `;
+
+  // 3. Build Competency Context (If user selected any)
+  let competencyContext = "";
+  if (inputData.competencies) {
+      competencyContext = `\nCRITICAL REQUIREMENT: The user has explicitly selected these specific competencies. You MUST include them in the 'Key Qualifications' -> 'Competencies' section: ${inputData.competencies}`;
+  }
+
+  // 4. Construct User Prompt
+  let userPrompt = "";
+  
+  if (inputData.type === 'workload') {
+    userPrompt = `
+      Create a Job Description for:
+      Job Title: ${inputData.jobTitle}
+      Level: ${inputData.level}
+      Department: ${inputData.department}
+      
+      ${competencyContext}
+      
+      Based on this Workload Assessment / Task List:
+      "${contentToProcess}"
+    `;
+  } else {
+     // Upload Mode
+     userPrompt = `
+      Context: Job Title is "${inputData.jobTitle}".
+      ${competencyContext}
+      
+      Restructure the following raw text from an uploaded document into the official JSON structure defined above:
+      "${contentToProcess}"
+     `;
+  }
+
+  // 5. Call AI
+  try {
+    return callGenerativeAIService(systemPrompt, userPrompt);
+  } catch (e) {
+    return { error: "Failed to generate JD. " + e.message };
+  }
+}
+
+/**
+ * Connects to an LLM (Gemini or OpenAI).
+ * NOTE: You must set a Script Property 'AI_API_KEY' for this to work with a real API.
+ * If no key is found, it returns MOCK DATA for testing.
+ */
+function callGenerativeAIService(system, user) {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const apiKey = scriptProperties.getProperty('AI_API_KEY'); 
+
+  // 1. If no key exists, go straight to Mock
+  if (!apiKey) {
+    return getMockJDData(user); 
+  }
+
+  // 2. Setup Real API Call
+  // Using the Lite model as it's the most efficient for your key
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+  
+  const payload = {
+    contents: [{
+      parts: [{ text: system + "\n\nUSER INPUT:\n" + user }]
+    }],
+    generationConfig: {
+      response_mime_type: "application/json"
+    }
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true // Allows us to read the error code (429) instead of crashing
+  };
+
+  // 3. Attempt Call with Auto-Fallback
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+
+    // SUCCESS CASE (200 OK)
+    if (responseCode === 200) {
+      const json = JSON.parse(responseText);
+      if (json.candidates && json.candidates[0].content) {
+        let text = json.candidates[0].content.parts[0].text;
+        
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          // JSON Cleaning Fallback
+          const firstBrace = text.indexOf('{');
+          const lastBrace = text.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace !== -1) {
+             return JSON.parse(text.substring(firstBrace, lastBrace + 1));
+          }
+        }
+      }
+    }
+
+    // --- FALLBACK TRIGGERED ---
+    // If we get here, it means responseCode was NOT 200 (e.g. 429 Quota, 503 Overload, 500 Error)
+    Logger.log(`API Failed (Code ${responseCode}). Switching to Mock Data. Details: ${responseText}`);
+    
+    // Get the mock data
+    const mockData = getMockJDData(user);
+    
+    // Optional: Add a tag to the Role Summary so the user knows this is Mock Data
+    if (mockData.OrganizationalRole) {
+        mockData.OrganizationalRole = "[⚠️ API Quota Exceeded - Showing Example Data] " + mockData.OrganizationalRole;
+    }
+    
+    return mockData;
+
+  } catch (e) {
+    // NETWORK/SCRIPT ERROR FALLBACK
+    // If the internet is down or script crashes, also return Mock Data
+    Logger.log(`Script Error: ${e.message}. Switching to Mock Data.`);
+    
+    const mockData = getMockJDData(user);
+    mockData.OrganizationalRole = "[⚠️ Network Error - Showing Example Data] " + mockData.OrganizationalRole;
+    return mockData;
+  }
+}
+
+/**
+ * Extracts text from an uploaded file blob.
+ * For complex PDFs/Docs, this requires the Advanced Drive Service enabled.
+ * Falling back to a simple string for this demo.
+ */
+function extractTextFromUploadedFile(fileObj) {
+  try {
+    const decoded = Utilities.base64Decode(fileObj.content);
+    const blob = Utilities.newBlob(decoded, fileObj.mimeType, fileObj.name);
+    
+    // Basic text file handling
+    if (fileObj.mimeType === 'text/plain') {
+      return blob.getDataAsString();
+    }
+    
+    // For PDFs/Docs, in a standard GAS environment without libraries, 
+    // robust text extraction is complex. 
+    // We return a placeholder instructing the user if we can't parse it easily.
+    // A real implementation would use Drive.Files.insert({ocr: true})
+    return "Uploaded File Content: " + fileObj.name + ". (Note: Text extraction requires Drive API enablement. Please paste text directly for best results in this demo.)";
+  } catch (e) {
+    return "Error reading file: " + e.message;
+  }
+}
+
+/**
+ * Returns dummy data so the UI works immediately without an API key.
+ */
+function getMockJDData(userPrompt) {
+  // Robust extraction: Look for the job title in the prompt string
+  // The prompt format from generateJobDescriptionAI is: "Create a JD for:\n Job Title: X..."
+  let detectedTitle = "Generic Position";
+  
+  // Regex to find "Job Title: [Something]"
+  const match = userPrompt && userPrompt.match(/Job Title:\s*(.+?)(\n|$)/i);
+  if (match && match[1]) {
+    detectedTitle = match[1].trim();
+  } else if (userPrompt && userPrompt.includes("Context: Job Title is")) {
+     // Handle the Upload prompt format
+     const match2 = userPrompt.match(/Context: Job Title is "(.+?)"/i);
+     if (match2 && match2[1]) detectedTitle = match2[1].trim();
+  }
+
+  // Return structure matching exactly what the Flattening Strategy expects
+  return {
+    "OrganizationalRole": `[MOCK MODE] This is a generated description for the ${detectedTitle} position. Connect a valid API Key to generate real content based on your specific inputs.`,
+    "KPIs": [`${detectedTitle} Efficiency Index`, "Operational Compliance Score", "Stakeholder Satisfaction > 90%"],
+    "CoreResponsibilities": {
+      "Planning": [`Develop strategic plans for ${detectedTitle} functions.`, "Forecast resource requirements."],
+      "Leading": [`Supervise and mentor the ${detectedTitle} team.`, "Conduct performance reviews."],
+      "Organizing": ["Coordinate departmental workflows.", "Manage documentation and SOPs."],
+      "Controlling": ["Monitor compliance with company policies.", "Audit process efficiency."]
+    },
+    "SupportingResponsibilities": {
+      "Planning": ["Assist in annual budgeting."],
+      "Leading": ["Facilitate cross-functional training."],
+      "Organizing": ["Maintain digital archives."],
+      "Controlling": ["Review safety incident logs."]
+    },
+    "ProductivityTools": ["Google Workspace", "SAP", "Jira", "Slack"],
+    "WorkingConditions": "Standard office environment with occasional travel.",
+    "KeyQualifications": {
+      "Knowledge": [`Principles of ${detectedTitle}`, "Corporate Standards"],
+      "Experience": [`3-5 Years in ${detectedTitle} or similar role`],
+      "Competencies": ["Strategic Thinking", "Communication", "Problem Solving"],
+      "PersonalAttributes": ["Integrity", "Adaptability", "Leadership"]
+    },
+    "LDMatrix": ["Advanced Management Course", "Technical Certification Level 2"]
+  };
+}
+
+function debugModelList() {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const apiKey = scriptProperties.getProperty('AI_API_KEY');
+  
+  if (!apiKey) {
+    Logger.log("ERROR: No API Key found in Script Properties.");
+    return;
+  }
+
+  // We check the v1beta endpoint to see all available models
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+  
+  try {
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const json = JSON.parse(response.getContentText());
+    
+    if (json.error) {
+      Logger.log("API Error: " + JSON.stringify(json.error));
+    } else if (json.models) {
+      Logger.log("--- AVAILABLE MODELS ---");
+      // Filter for models that support 'generateContent'
+      const contentModels = json.models.filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"));
+      contentModels.forEach(m => Logger.log(m.name));
+      Logger.log("------------------------");
+    } else {
+      Logger.log("Unexpected response: " + response.getContentText());
+    }
+  } catch (e) {
+    Logger.log("Fetch failed: " + e.message);
+  }
+}
+
+/**
+ * SAVES THE JD PDF TO GOOGLE DRIVE
+ * Folder: JD_GENERAL_FOLDER_ID (Defined at the top of your script)
+ * Filename: POSITION ID JOB TITLE (All Caps)
+ */
+function saveJDToDrive(dataURI, positionId, jobTitle) {
+  try {
+    // 1. Prepare Filename (Uppercase, Cleaned)
+    const cleanPosId = (positionId || "NO-ID").toString().toUpperCase().trim();
+    const cleanTitle = (jobTitle || "JOB-TITLE").toString().toUpperCase().trim();
+    const fileName = `${cleanPosId} ${cleanTitle}.pdf`;
+
+    // 2. Process Base64 Data
+    const base64Data = dataURI.split(',')[1]; // Remove the "data:application/pdf;base64," prefix
+    const decoded = Utilities.base64Decode(base64Data);
+    const blob = Utilities.newBlob(decoded, "application/pdf", fileName);
+
+    // 3. Get Folder and Create File
+    // uses the existing global constant JD_GENERAL_FOLDER_ID from your Code.gs
+    const folder = DriveApp.getFolderById(JD_GENERAL_FOLDER_ID); 
+    const file = folder.createFile(blob);
+    
+    return { 
+      success: true, 
+      url: file.getUrl(), 
+      name: file.getName() 
+    };
+
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * REGENERATES A SPECIFIC SECTION OF THE JD
+ */
+function regenerateJDSection(sectionName, jobContext) {
+  const systemPrompt = `
+    You are an HR Specialist. Your task is to rewrite ONLY the "${sectionName}" section for a Job Description.
+    
+    JOB CONTEXT:
+    - Title: ${jobContext.jobTitle}
+    - Level: ${jobContext.level}
+    - Department: ${jobContext.department}
+    - Input Data: "${jobContext.content}"
+
+    RULES:
+    1. Output ONLY the JSON content for this specific section. Do not output the whole JD.
+    2. If the section is "CoreResponsibilities" or "SupportingResponsibilities", you MUST return it categorized by PLOC.
+    3. Return valid JSON only. No markdown.
+  `;
+
+  // Map the section name to the expected JSON key
+  let targetKey = sectionName;
+  
+  if (sectionName === "KPIs") targetKey = "KPIs";
+  if (sectionName === "Core Responsibilities") targetKey = "CoreResponsibilities";
+  if (sectionName === "Supporting Responsibilities") targetKey = "SupportingResponsibilities";
+  if (sectionName === "Productivity Tools") targetKey = "ProductivityTools";
+  if (sectionName === "Key Qualifications") targetKey = "KeyQualifications";
+  if (sectionName === "Working Conditions") targetKey = "WorkingConditions";
+  if (sectionName === "Organizational Role") targetKey = "OrganizationalRole";
+  if (sectionName === "Organizational Relationship") targetKey = "OrganizationalRelationship";
+  if (sectionName === "Preferred Internal") targetKey = "PreferredInternal";
+  if (sectionName === "Preferred External") targetKey = "PreferredExternal";
+
+  const userPrompt = `Regenerate the "${sectionName}" section based on the context provided. Provide diverse and professional outputs.`;
+
+  try {
+    const result = callGenerativeAIService(systemPrompt, userPrompt);
+    // Return with a standard key so frontend knows where to look
+    return { [targetKey]: result[targetKey] || result }; 
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+/**
+ * Fetches a clean list of competency names from the Matrix for the picker.
+ */
+function getCompetencyNames() {
+  try {
+    // Reuse your existing config logic to get the raw headers
+    const config = getCompetencyConfig(); 
+    const allHeaders = [...config.CORE, ...config.LEADERSHIP, ...config.TECHNICAL];
+    
+    // Clean up the names (Remove "CORE - ", "LEAD - ", "TECH - ")
+    const cleanNames = allHeaders.map(h => {
+      return h.replace(/^(CORE|LEAD|TECH)\s?-\s?/i, '').trim();
+    }).filter(n => n); // Remove empty strings
+    
+    // Return unique, sorted list
+    return [...new Set(cleanNames)].sort();
+  } catch (e) {
+    Logger.log("Error fetching competencies: " + e.message);
+    return []; // Return empty list on error to prevent crash
+  }
+}
+
+/**
+ * Centralized Permission Helper
+ * Reads existing 'Viewable Department' for scope and new 'Access Competency' for module access.
+ */
+function getSessionPermissions() {
+  const userEmail = Session.getActiveUser().getEmail().toLowerCase();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const permSheet = ss.getSheetByName('Permissions');
+  
+  // Default deny
+  if (!permSheet) return { hasModuleAccess: false, allowedScopes: [] };
+
+  const data = permSheet.getDataRange().getValues();
+  const headers = data.shift().map(h => h.toString().trim().toLowerCase());
+  
+  // Locate columns by name (flexible positioning)
+  const emailIdx = headers.indexOf('email'); 
+  const compAccessIdx = headers.indexOf('access competency'); // NEW COLUMN
+  const scopeIdx = headers.indexOf('viewable department'); // EXISTING COLUMN
+
+  // Find the row for the current user
+  const userRow = data.find(row => row[emailIdx] && row[emailIdx].toString().trim().toLowerCase() === userEmail);
+
+  if (!userRow) return { hasModuleAccess: false, allowedScopes: [] };
+
+  // 1. Determine Module Access (Role)
+  // Grants access if cell contains 'x', 'all', or 'anyone'
+  const rawAccess = (compAccessIdx > -1 && userRow[compAccessIdx]) ? userRow[compAccessIdx].toString().toLowerCase() : '';
+  const hasModuleAccess = ['x', 'all', 'anyone', 'true'].includes(rawAccess);
+
+  // 2. Determine Scope (Reuse Viewable Department)
+  const rawScope = (scopeIdx > -1 && userRow[scopeIdx]) ? userRow[scopeIdx].toString().toLowerCase() : '';
+  let allowedScopes = [];
+  
+  if (['all', 'anyone', ''].includes(rawScope)) {
+    allowedScopes = ['ALL'];
+  } else {
+    // Split by comma if multiple departments are listed
+    allowedScopes = rawScope.split(',').map(s => s.trim().toLowerCase()).filter(String);
+  }
+
+  return { hasModuleAccess, allowedScopes, userEmail };
+}
+
+/**
+ * Helper to validate if a specific department/division is allowed
+ */
+function isScopeAllowed(targetValue, allowedScopes) {
+  if (!targetValue) return false;
+  if (allowedScopes.includes('ALL')) return true;
+  return allowedScopes.includes(targetValue.toString().toLowerCase().trim());
+}
+
+/**
+ * UPLOADS JD & AUTO-ORGANIZES FOLDERS
+ * Logic: If version count > 1, creates a sub-folder and moves files there.
+ */
+function uploadJdFile(fileData, type, positionId, employeeId, jobTitle) {
+  try {
+    const rootFolderId = (type === 'general') ? JD_GENERAL_FOLDER_ID : JD_INCUMBENT_FOLDER_ID;
+    const rootFolder = DriveApp.getFolderById(rootFolderId);
+    
+    // 1. Clean Metadata
+    const cleanPosId = (positionId || "NO-ID").toString().toUpperCase().trim();
+    const cleanTitle = (jobTitle || "JOB-TITLE").toString().toUpperCase().trim();
+    
+    // 2. Define Naming Conventions
+    let filePrefix; 
+    let folderName; 
+    
+    if (type === 'general') {
+       // Example: "04-CSD-001 ACCOUNTANT"
+       filePrefix = `${cleanPosId} ${cleanTitle}`;
+       folderName = filePrefix; 
+    } else {
+       // Example: "04-CSD-001-ACCOUNTANT-EMP123"
+       const cleanEmpId = (employeeId || "NO-EMP").toString().trim();
+       filePrefix = `${cleanPosId}-${cleanTitle}-${cleanEmpId}`;
+       folderName = filePrefix;
+    }
+
+    // 3. Determine Search/Save Location
+    // First, check if a specific sub-folder ALREADY exists
+    let targetFolder = rootFolder;
+    let isSubFolder = false;
+    
+    const subFolders = rootFolder.getFoldersByName(folderName);
+    if (subFolders.hasNext()) {
+        targetFolder = subFolders.next();
+        isSubFolder = true;
+    }
+
+    // 4. Scan Current Location for Versions
+    const files = targetFolder.getFiles();
+    let maxVersion = 0;
+    const existingFiles = []; 
+    const versionRegex = /Ver_(\d+)/i;
+
+    while (files.hasNext()) {
+      const f = files.next();
+      const fName = f.getName().toUpperCase();
+      
+      // Strict prefix check to avoid grabbing wrong files
+      if (fName.startsWith(filePrefix.toUpperCase())) {
+        existingFiles.push(f);
+        const match = fName.match(versionRegex);
+        if (match && match[1]) {
+          const vNum = parseInt(match[1], 10);
+          if (vNum > maxVersion) maxVersion = vNum;
+        }
+      }
+    }
+
+    // 5. AUTO-ORGANIZE LOGIC
+    // If we are currently in Root (not subfolder) AND we found previous files...
+    // It means we are about to create Version 2 (or higher).
+    // We should create a folder now to keep things clean.
+    if (!isSubFolder && existingFiles.length > 0) {
+        // Create the specific folder
+        const newSubFolder = rootFolder.createFolder(folderName);
+        
+        // Move ALL existing loose files into the new folder
+        existingFiles.forEach(file => {
+            file.moveTo(newSubFolder);
+        });
+        
+        // Update our target to the new folder
+        targetFolder = newSubFolder;
+    }
+
+    // 6. Calculate New Version & Name
+    const nextVersion = maxVersion + 1;
+    const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM-dd-yy");
+    const fileName = `${filePrefix} Ver_${nextVersion} [${dateStr}].pdf`;
+
+    // 7. Save New File
+    const blob = Utilities.newBlob(Utilities.base64Decode(fileData.content), fileData.mimeType, fileName);
+    const newFile = targetFolder.createFile(blob);
+    
+    return { success: true, name: fileName, url: newFile.getUrl() };
+
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Fetches full employee details by ID for the auto-populate feature.
+ */
+function getEmployeeFullDetails(employeeId) {
+  if (!employeeId) return null;
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const mainSheet = ss.getSheets()[0];
+    const data = mainSheet.getDataRange().getValues();
+    const headers = data.shift(); // Extract headers
+    
+    // Helper to find column index safely
+    const getIdx = (search) => headers.findIndex(h => String(h).toLowerCase().replace(/\s/g,'') === search.toLowerCase().replace(/\s/g,''));
+
+    const idIdx = getIdx('EmployeeID');
+    const nameIdx = getIdx('EmployeeName');
+    const dobIdx = getIdx('DateofBirth');
+    const hiredIdx = getIdx('DateHired');
+    const genderIdx = getIdx('Gender');
+
+    if (idIdx === -1) return null;
+
+    // Find the row matching the Employee ID
+    const row = data.find(r => String(r[idIdx]).trim().toUpperCase() === String(employeeId).trim().toUpperCase());
+    
+    if (!row) return null;
+
+    return {
+      name: (nameIdx > -1) ? row[nameIdx] : '',
+      dob: (dobIdx > -1 && row[dobIdx] instanceof Date) ? Utilities.formatDate(row[dobIdx], Session.getScriptTimeZone(), 'yyyy-MM-dd') : '',
+      hired: (hiredIdx > -1 && row[hiredIdx] instanceof Date) ? Utilities.formatDate(row[hiredIdx], Session.getScriptTimeZone(), 'yyyy-MM-dd') : '',
+      gender: (genderIdx > -1) ? row[genderIdx] : ''
+    };
+
+  } catch (e) {
+    Logger.log("Error in getEmployeeFullDetails: " + e.message);
+    return null;
   }
 }
